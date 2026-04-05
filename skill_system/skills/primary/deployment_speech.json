@@ -1,0 +1,123 @@
+﻿{
+    "skill_id":  "primary.deployment_speech",
+    "name":  "部署讲话稿",
+    "summary":  "适用于对一项工作进行总体部署、讲清形势、明确任务和提出要求的讲话稿。",
+    "applies_to":  [
+                       "部署讲话稿",
+                       "推进会讲话稿",
+                       "工作会议讲话稿"
+                   ],
+    "not_for":  [
+                    "表态发言稿",
+                    "经验总结材料"
+                ],
+    "writing_goals":  [
+                          "讲清当前形势和任务背景",
+                          "明确工作目标和重点任务",
+                          "提出推进措施和工作要求"
+                      ],
+    "required_slots":  [
+                           {
+                               "slot_id":  "situation_judgment",
+                               "name":  "形势判断",
+                               "purpose":  "交代为什么当前要重点抓这项工作。",
+                               "evidence_types":  [
+                                                      "背景形势",
+                                                      "上级要求",
+                                                      "现实压力"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "要有判断，不要只写套话式开场"
+                                                        ],
+                               "questions":  [
+                                                 "当前为什么必须抓这项工作？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "overall_goal",
+                               "name":  "总体目标",
+                               "purpose":  "明确当前工作的目标导向和总体要求。",
+                               "evidence_types":  [
+                                                      "目标要求",
+                                                      "总体思路",
+                                                      "工作方向"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "目标要集中，不要过散"
+                                                        ],
+                               "questions":  [
+                                                 "这项工作总目标是什么？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "key_tasks",
+                               "name":  "重点任务",
+                               "purpose":  "分层次明确下一步要抓的重点工作。",
+                               "evidence_types":  [
+                                                      "重点任务",
+                                                      "专项工作",
+                                                      "关键抓手"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "任务要分层、有轻重主次"
+                                                        ],
+                               "questions":  [
+                                                 "最关键的任务有哪些？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "implementation_measures",
+                               "name":  "推进措施",
+                               "purpose":  "说明如何推动重点任务真正落下去。",
+                               "evidence_types":  [
+                                                      "工作机制",
+                                                      "推进办法",
+                                                      "保障措施"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "措施要有操作感，不能只写抽象要求"
+                                                        ],
+                               "questions":  [
+                                                 "为了落实任务，准备采取什么措施？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "work_requirements",
+                               "name":  "工作要求",
+                               "purpose":  "提出作风、责任、纪律、统筹等方面要求。",
+                               "evidence_types":  [
+                                                      "责任要求",
+                                                      "作风要求",
+                                                      "纪律要求"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "要求段要有压力传导感"
+                                                        ],
+                               "questions":  [
+                                                 "对责任落实和作风纪律有什么要求？"
+                                             ]
+                           }
+                       ],
+    "review_rubric":  [
+                          "形势判断不能太空",
+                          "重点任务必须清晰",
+                          "推进措施要有操作感",
+                          "工作要求要有责任压力"
+                      ],
+    "query_hints":  [
+                        "优先找上级部署要求、会议材料、重点任务清单、推进方案",
+                        "优先 grep 目标、重点、推进、机制、责任、落实等关键词"
+                    ],
+    "preserve_rules":  [
+
+                       ],
+    "output_preferences":  {
+                               "tone":  "判断明确、部署清晰、要求有力",
+                               "structure":  "形势 -\u003e 目标 -\u003e 任务 -\u003e 措施 -\u003e 要求"
+                           },
+    "variants":  [
+                     "重点工作部署讲话稿",
+                     "工作推进会讲话稿",
+                     "学习大会部署讲话稿"
+                 ]
+}

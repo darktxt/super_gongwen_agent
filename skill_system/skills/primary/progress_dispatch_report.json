@@ -1,0 +1,123 @@
+﻿{
+    "skill_id":  "primary.progress_dispatch_report",
+    "name":  "工作进展调度报告",
+    "summary":  "适用于阶段性盘点工作推进情况、突出堵点问题并提出下一步调度要求的报告。",
+    "applies_to":  [
+                       "工作进展调度报告",
+                       "阶段性推进情况报告",
+                       "重点任务调度报告"
+                   ],
+    "not_for":  [
+                    "经验总结材料",
+                    "表态发言稿"
+                ],
+    "writing_goals":  [
+                          "盘点当前工作进展",
+                          "识别堵点卡点",
+                          "明确后续调度重点和节点要求"
+                      ],
+    "required_slots":  [
+                           {
+                               "slot_id":  "current_progress",
+                               "name":  "当前进展",
+                               "purpose":  "概括当前整体推进态势和主要进度。",
+                               "evidence_types":  [
+                                                      "进度数据",
+                                                      "任务完成率",
+                                                      "节点状态"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "要让读者看出进展快慢和总体态势"
+                                                        ],
+                               "questions":  [
+                                                 "目前整体推进到了什么阶段？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "key_task_breakdown",
+                               "name":  "重点任务拆解",
+                               "purpose":  "按关键任务、项目或专项行动拆解进展情况。",
+                               "evidence_types":  [
+                                                      "重点任务",
+                                                      "项目清单",
+                                                      "节点任务"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "重点任务要拆开写，避免全部混在一起"
+                                                        ],
+                               "questions":  [
+                                                 "哪些重点任务推进较快，哪些推进较慢？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "bottlenecks",
+                               "name":  "堵点卡点",
+                               "purpose":  "指出影响推进的主要问题。",
+                               "evidence_types":  [
+                                                      "堵点问题",
+                                                      "制约因素",
+                                                      "短板环节"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "问题要指向具体环节或节点"
+                                                        ],
+                               "questions":  [
+                                                 "当前最大的堵点是什么？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "dispatch_actions",
+                               "name":  "调度举措",
+                               "purpose":  "说明为了加快推进采取了哪些调度、督办、协调动作。",
+                               "evidence_types":  [
+                                                      "协调机制",
+                                                      "督办动作",
+                                                      "现场推进"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "调度动作不能只写‘强化调度’四个字"
+                                                        ],
+                               "questions":  [
+                                                 "为了推动进展，已经采取了什么协调和督办措施？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "next_nodes",
+                               "name":  "下一步节点安排",
+                               "purpose":  "明确下一阶段的时间节点、重点任务和责任要求。",
+                               "evidence_types":  [
+                                                      "时间节点",
+                                                      "责任要求",
+                                                      "重点事项"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "下一步要尽量具备时间感和节点感"
+                                                        ],
+                               "questions":  [
+                                                 "下一阶段最关键的节点是什么？"
+                                             ]
+                           }
+                       ],
+    "review_rubric":  [
+                          "进展要有节点感",
+                          "重点任务要拆开写",
+                          "堵点问题要具体",
+                          "调度举措不能泛化",
+                          "下一步要体现时间节点和责任压力"
+                      ],
+    "query_hints":  [
+                        "优先找调度纪要、项目台账、节点清单、督办记录",
+                        "优先 grep 进展、节点、滞后、协调、督办、推进等关键词"
+                    ],
+    "preserve_rules":  [
+
+                       ],
+    "output_preferences":  {
+                               "tone":  "节奏感强、问题导向、强调节点",
+                               "structure":  "进展盘点 -\u003e 重点任务 -\u003e 堵点问题 -\u003e 调度举措 -\u003e 下一步"
+                           },
+    "variants":  [
+                     "重点项目进展调度报告",
+                     "专项工作推进情况调度报告"
+                 ]
+}

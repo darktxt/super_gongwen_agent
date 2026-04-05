@@ -1,0 +1,122 @@
+﻿{
+    "skill_id":  "primary.implementation_plan",
+    "name":  "实施方案",
+    "summary":  "适用于明确目标、原则、任务、步骤和保障措施的方案类文本。",
+    "applies_to":  [
+                       "实施方案",
+                       "工作方案",
+                       "专项行动方案"
+                   ],
+    "not_for":  [
+                    "讲话稿",
+                    "经验总结材料"
+                ],
+    "writing_goals":  [
+                          "明确总体要求和工作原则",
+                          "分解重点任务和实施步骤",
+                          "提出组织保障和责任机制"
+                      ],
+    "required_slots":  [
+                           {
+                               "slot_id":  "overall_requirements",
+                               "name":  "总体要求",
+                               "purpose":  "写明指导思想、工作目标或总体思路。",
+                               "evidence_types":  [
+                                                      "上级要求",
+                                                      "目标任务",
+                                                      "总体思路"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "要体现方案的总牵引"
+                                                        ],
+                               "questions":  [
+                                                 "本方案的总目标是什么？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "basic_principles",
+                               "name":  "基本原则",
+                               "purpose":  "概括实施过程中应把握的原则。",
+                               "evidence_types":  [
+                                                      "原则要求",
+                                                      "工作方法",
+                                                      "底线要求"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "原则不宜过多，重在管总"
+                                                        ],
+                               "questions":  [
+                                                 "推进过程中最需要坚持哪些原则？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "key_tasks",
+                               "name":  "重点任务",
+                               "purpose":  "分项明确需要完成的主要任务。",
+                               "evidence_types":  [
+                                                      "任务清单",
+                                                      "专项举措",
+                                                      "工作重点"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "任务要可执行、可分解"
+                                                        ],
+                               "questions":  [
+                                                 "本方案最核心的任务有哪些？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "implementation_steps",
+                               "name":  "实施步骤",
+                               "purpose":  "说明阶段安排、推进顺序和时间节点。",
+                               "evidence_types":  [
+                                                      "阶段划分",
+                                                      "时间节点",
+                                                      "步骤安排"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "方案最好体现阶段感和时间感"
+                                                        ],
+                               "questions":  [
+                                                 "实施分几个阶段？各阶段重点是什么？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "guarantee_measures",
+                               "name":  "保障措施",
+                               "purpose":  "说明组织领导、责任落实、督促检查等保障安排。",
+                               "evidence_types":  [
+                                                      "组织保障",
+                                                      "责任机制",
+                                                      "督查机制"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "保障措施不能仅写空泛要求"
+                                                        ],
+                               "questions":  [
+                                                 "如何保障方案落地？"
+                                             ]
+                           }
+                       ],
+    "review_rubric":  [
+                          "总体要求要管总",
+                          "重点任务要可执行",
+                          "实施步骤要有阶段感",
+                          "保障措施要有落地抓手"
+                      ],
+    "query_hints":  [
+                        "优先找上级方案、任务清单、实施步骤、责任分工材料",
+                        "优先 grep 目标、原则、任务、步骤、保障等关键词"
+                    ],
+    "preserve_rules":  [
+
+                       ],
+    "output_preferences":  {
+                               "tone":  "规范、清晰、可执行",
+                               "structure":  "总体要求 -\u003e 基本原则 -\u003e 重点任务 -\u003e 实施步骤 -\u003e 保障措施"
+                           },
+    "variants":  [
+                     "专项行动实施方案",
+                     "年度工作实施方案"
+                 ]
+}

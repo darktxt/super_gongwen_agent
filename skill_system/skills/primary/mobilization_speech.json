@@ -1,0 +1,124 @@
+﻿{
+    "skill_id":  "primary.mobilization_speech",
+    "name":  "动员讲话稿",
+    "summary":  "适用于统一思想、激发行动、形成攻坚氛围的动员类讲话稿。",
+    "applies_to":  [
+                       "动员讲话稿",
+                       "学习大会讲话稿",
+                       "集中部署前的动员讲话"
+                   ],
+    "not_for":  [
+                    "整改落实情况报告",
+                    "实施方案",
+                    "情况通报"
+                ],
+    "writing_goals":  [
+                          "统一思想认识",
+                          "讲清这项工作的重大意义",
+                          "提振状态、形成行动共识",
+                          "提出行动要求和纪律要求"
+                      ],
+    "required_slots":  [
+                           {
+                               "slot_id":  "significance",
+                               "name":  "重要意义",
+                               "purpose":  "回答为什么要开展这项工作、为什么必须重视。",
+                               "evidence_types":  [
+                                                      "政治要求",
+                                                      "现实需要",
+                                                      "发展任务"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "意义段要能立得住，不要泛泛拔高"
+                                                        ],
+                               "questions":  [
+                                                 "为什么必须在当前节点抓这项工作？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "thought_unification",
+                               "name":  "统一思想",
+                               "purpose":  "引导与会人员在认识上对齐。",
+                               "evidence_types":  [
+                                                      "认识要求",
+                                                      "思想共识",
+                                                      "工作导向"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "要讲清该怎么看、为什么这么看"
+                                                        ],
+                               "questions":  [
+                                                 "本次动员最需要统一哪些认识？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "action_call",
+                               "name":  "行动号召",
+                               "purpose":  "明确要以什么状态、什么标准投入工作。",
+                               "evidence_types":  [
+                                                      "状态要求",
+                                                      "作风要求",
+                                                      "攻坚要求"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "语言要有鼓动性和压迫感，但不能空喊口号"
+                                                        ],
+                               "questions":  [
+                                                 "最需要强调什么行动状态？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "task_requirements",
+                               "name":  "任务要求",
+                               "purpose":  "明确要重点抓的任务方向或底线要求。",
+                               "evidence_types":  [
+                                                      "重点任务",
+                                                      "底线要求",
+                                                      "基本原则"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "即使是动员讲话，也要有任务抓手"
+                                                        ],
+                               "questions":  [
+                                                 "本次动员后最需要抓哪几项任务？"
+                                             ]
+                           },
+                           {
+                               "slot_id":  "discipline_requirements",
+                               "name":  "纪律作风要求",
+                               "purpose":  "提出责任、纪律、作风和组织保障要求。",
+                               "evidence_types":  [
+                                                      "责任要求",
+                                                      "纪律要求",
+                                                      "组织保障"
+                                                  ],
+                               "writing_requirements":  [
+                                                            "收束部分要有压实责任效果"
+                                                        ],
+                               "questions":  [
+                                                 "对责任落实和作风纪律有哪些明确要求？"
+                                             ]
+                           }
+                       ],
+    "review_rubric":  [
+                          "不能只有意义拔高没有行动要求",
+                          "统一思想不能空泛",
+                          "动员性要强，但也要有抓手",
+                          "结尾要能压实责任和纪律"
+                      ],
+    "query_hints":  [
+                        "优先找上级动员部署要求、讲话提法、阶段任务清单",
+                        "优先 grep 统一思想、提高站位、迅速行动、压实责任、严明纪律等关键词"
+                    ],
+    "preserve_rules":  [
+
+                       ],
+    "output_preferences":  {
+                               "tone":  "鼓动性强、要求鲜明、状态感足",
+                               "structure":  "意义 -\u003e 认识 -\u003e 号召 -\u003e 任务 -\u003e 纪律要求"
+                           },
+    "variants":  [
+                     "主题教育学习大会讲话稿",
+                     "专项行动动员讲话稿"
+                 ]
+}
