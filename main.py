@@ -65,12 +65,29 @@ def _should_enter_interactive_loop() -> bool:
     return bool(sys.stdin.isatty() and sys.stdout.isatty())
 
 
+def _emit_progress(message: str) -> None:
+    print(message, flush=True)
+
+
+def _emit_round_progress(assembler: ResultAssembler, turn_result: object) -> None:
+    rendered = assembler.render_round_progress(turn_result)
+    if rendered.strip():
+        print("")
+        print(rendered, flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     assembler = ResultAssembler()
 
-    app = create_app(config=load_config(base_dir=args.base_dir))
+    app = create_app(
+        config=load_config(base_dir=args.base_dir),
+        progress_reporter=_emit_progress if args.user_input else None,
+        round_reporter=(lambda turn_result: _emit_round_progress(assembler, turn_result))
+        if args.user_input
+        else None,
+    )
     if args.user_input:
         session_id = args.session_id or generate_session_id()
         turn_result = app.run_turn(
@@ -100,11 +117,10 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     result = app.bootstrap(session_id=args.session_id)
-    print(result.message)
-    print(f"app_home={result.app_home}")
-    print(f"sessions_root={result.sessions_root}")
+    print("会话已初始化。")
     if result.session_id:
-        print(f"session_id={result.session_id}")
+        print(f"会话ID：{result.session_id}")
+        print("可使用该会话ID继续发起或续写公文。")
     return 0
 
 

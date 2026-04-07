@@ -18,6 +18,7 @@ class SessionPaths:
     versions_dir: Path
     outputs_dir: Path
     final_output_path: Path
+    final_markdown_path: Path
 
 
 def _resolve_app_home_path(app_home: str | Path | None) -> Path:
@@ -42,7 +43,8 @@ def build_session_paths(session_id: str, app_home: str | Path | None = None) -> 
         tool_results_dir=session_root / "tool_results",
         versions_dir=session_root / "versions",
         outputs_dir=outputs_dir,
-        final_output_path=outputs_dir / "final.md",
+        final_output_path=outputs_dir / "final.docx",
+        final_markdown_path=outputs_dir / "final.md",
     )
 
 

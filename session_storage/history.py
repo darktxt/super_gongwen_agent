@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from .docx_export import export_official_docx
 from .events import EventRecord, build_event
 from .paths import SessionPaths, build_session_paths
 
@@ -71,13 +72,17 @@ def save_final_output(
     encoding: str = "utf-8",
 ) -> Path:
     paths = initialize_session_storage(session_id=session_id, app_home=app_home)
-    paths.final_output_path.write_text(content, encoding=encoding)
+    paths.final_markdown_path.write_text(content, encoding=encoding)
+    export_official_docx(content, paths.final_output_path)
     append_event(
         session_id=session_id,
         event=build_event(
             session_id=session_id,
             event_type="final_output_saved",
-            payload={"file_path": str(paths.final_output_path)},
+            payload={
+                "file_path": str(paths.final_output_path),
+                "markdown_path": str(paths.final_markdown_path),
+            },
         ),
         app_home=app_home,
         encoding=encoding,

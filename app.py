@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import logging
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
 from api_gateway.llm_client import LLMClient, OpenAICloudLLMClient, UnconfiguredLLMClient
 from config import AppConfig, load_config
@@ -73,6 +73,8 @@ class SuperGongwenApp:
         metrics: MetricsCollector | None = None,
         event_writer: ObservabilityEventWriter | None = None,
         working_root: str | Path | None = None,
+        progress_reporter: Callable[[str], None] | None = None,
+        round_reporter: Callable[[TurnRunResult], None] | None = None,
     ) -> None:
         self.config = config or load_config()
         self.workspace_store = WorkspaceStore(app_home=self.config.app_home)
@@ -93,6 +95,8 @@ class SuperGongwenApp:
         self.metrics = metrics or MetricsCollector()
         self.event_writer = event_writer or ObservabilityEventWriter(app_home=self.config.app_home)
         self.working_root = Path(working_root).resolve() if working_root is not None else Path.cwd()
+        self.progress_reporter = progress_reporter
+        self.round_reporter = round_reporter
 
     def bootstrap(self, session_id: str | None = None) -> AppBootstrapResult:
         self.config.sessions_root.mkdir(parents=True, exist_ok=True)
@@ -133,6 +137,7 @@ class SuperGongwenApp:
             has_user_input=bool(user_input.strip()),
             workspace_summary=self._summarize_workspace(workspace),
         )
+        self._report_user_progress("开始处理本轮写作需求，请稍候。")
 
         rounds_used = 0
         last_step: BrainStepResult | None = None
@@ -140,6 +145,7 @@ class SuperGongwenApp:
 
         try:
             for rounds_used in range(1, max_rounds + 1):
+                self._report_user_progress(f"第 {rounds_used} 轮：正在分析需求与材料。")
                 round_debug_files: dict[str, str] = {}
                 workspace_before_summary = self._summarize_workspace(workspace)
                 self._write_round_debug_file(
@@ -290,6 +296,7 @@ class SuperGongwenApp:
                 step = brain_result.step
                 last_step = step
                 step_summary = self._summarize_step(step)
+                self._report_round_step_progress(rounds_used, step_summary)
                 step_debug_file = self._write_round_debug_file(
                     session_id,
                     rounds_used,
@@ -398,6 +405,16 @@ class SuperGongwenApp:
                         workspace_summary=workspace_summary,
                     )
                     self.workspace_store.save(workspace)
+                    self._report_round_result(
+                        TurnRunResult(
+                            session_id=session_id,
+                            status="continued",
+                            rounds_used=rounds_used,
+                            llm_raw_output=last_llm_raw_output,
+                            step=step,
+                            workspace=workspace,
+                        )
+                    )
                     self._record_runtime_event(
                         session_id,
                         "workspace_checkpoint_saved",
@@ -472,6 +489,16 @@ class SuperGongwenApp:
                         workspace_summary=workspace_summary,
                     )
                     self.workspace_store.save(workspace)
+                    self._report_round_result(
+                        TurnRunResult(
+                            session_id=session_id,
+                            status="continued",
+                            rounds_used=rounds_used,
+                            llm_raw_output=last_llm_raw_output,
+                            step=step,
+                            workspace=workspace,
+                        )
+                    )
                     self._record_runtime_event(
                         session_id,
                         "workspace_checkpoint_saved",
@@ -688,6 +715,16 @@ class SuperGongwenApp:
                     workspace_summary=workspace_summary,
                 )
                 self.workspace_store.save(workspace)
+                self._report_round_result(
+                    TurnRunResult(
+                        session_id=session_id,
+                        status="continued",
+                        rounds_used=rounds_used,
+                        llm_raw_output=last_llm_raw_output,
+                        step=step,
+                        workspace=workspace,
+                    )
+                )
                 self._record_runtime_event(
                     session_id,
                     "workspace_checkpoint_saved",
@@ -1802,6 +1839,35 @@ class SuperGongwenApp:
     ) -> None:
         log_structured(self.logger, level, event_type, session_id=session_id, **payload)
         self.event_writer.record(session_id, event_type, payload)
+
+    def _report_user_progress(self, message: str) -> None:
+        if self.progress_reporter is None:
+            return
+        normalized = str(message or "").strip()
+        if not normalized:
+            return
+        self.progress_reporter(normalized)
+
+    def _report_round_step_progress(
+        self,
+        round_no: int,
+        step_summary: dict[str, Any] | None,
+    ) -> None:
+        if self.round_reporter is not None:
+            return
+        summary = dict(step_summary or {})
+        digest = str(summary.get("output_digest", "") or "").strip()
+        if digest:
+            self._report_user_progress(f"第 {round_no} 轮：{digest}")
+            return
+        action_taken = str(summary.get("action_taken", "") or "").strip()
+        if action_taken:
+            self._report_user_progress(f"第 {round_no} 轮：已执行 {action_taken}。")
+
+    def _report_round_result(self, turn_result: TurnRunResult) -> None:
+        if self.round_reporter is None:
+            return
+        self.round_reporter(turn_result)
 
 
 def create_app(

@@ -6,60 +6,66 @@ from utils.serialization import JsonDataclassMixin
 
 
 @dataclass(slots=True)
-class AskUserViewModel(JsonDataclassMixin):
-    status: str = "needs_user_input"
-    session_id: str = ""
-    rounds_used: int = 0
-    question_pack: list[dict[str, object]] = field(default_factory=list)
-    pending_questions: list[dict[str, object]] = field(default_factory=list)
-    last_action: str = ""
-    message: str = ""
-
-
-@dataclass(slots=True)
-class CompletedViewModel(JsonDataclassMixin):
-    status: str = "completed"
-    session_id: str = ""
-    rounds_used: int = 0
-    final_text: str = ""
-    final_output_path: str = ""
-    primary_skill_id: str = ""
-    revision_skill_ids: list[str] = field(default_factory=list)
-    last_action: str = ""
-    message: str = ""
+class RoundReviewViewModel(JsonDataclassMixin):
+    content_status_summary: str = ""
+    language_status_summary: str = ""
+    dominant_issue: str = ""
+    open_gaps: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     @property
-    def active_skill_ids(self) -> list[str]:
-        skill_ids: list[str] = []
-        primary_skill_id = str(self.primary_skill_id).strip()
-        if primary_skill_id:
-            skill_ids.append(primary_skill_id)
-        for skill_id in self.revision_skill_ids:
-            normalized = str(skill_id).strip()
-            if normalized and normalized not in skill_ids:
-                skill_ids.append(normalized)
-        return skill_ids
+    def has_content(self) -> bool:
+        return bool(
+            self.content_status_summary
+            or self.language_status_summary
+            or self.dominant_issue
+            or self.open_gaps
+            or self.notes
+        )
 
 
 @dataclass(slots=True)
-class FailedViewModel(JsonDataclassMixin):
-    status: str = "failed"
+class RoundContextViewModel(JsonDataclassMixin):
     session_id: str = ""
     rounds_used: int = 0
+    action_taken: str = ""
+    action_label: str = ""
+    primary_skill_display: str = ""
+    revision_skill_displays: list[str] = field(default_factory=list)
+    review: RoundReviewViewModel = field(default_factory=RoundReviewViewModel)
+    artifact_title: str = ""
+    artifact_text: str = ""
+    material_actions: list[str] = field(default_factory=list)
+    material_names: list[str] = field(default_factory=list)
+    next_step_hint: str = ""
+    message: str = ""
+
+
+@dataclass(slots=True)
+class AskUserViewModel(RoundContextViewModel):
+    status: str = "needs_user_input"
+    question_pack: list[dict[str, object]] = field(default_factory=list)
+    pending_questions: list[dict[str, object]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class CompletedViewModel(RoundContextViewModel):
+    status: str = "completed"
+    final_text: str = ""
+    final_output_path: str = ""
+
+
+@dataclass(slots=True)
+class FailedViewModel(RoundContextViewModel):
+    status: str = "failed"
     error_message: str = ""
     llm_raw_output: str = ""
-    last_action: str = ""
-    message: str = ""
 
 
 @dataclass(slots=True)
-class MaxRoundsExceededViewModel(JsonDataclassMixin):
+class MaxRoundsExceededViewModel(RoundContextViewModel):
     status: str = "max_rounds_exceeded"
-    session_id: str = ""
-    rounds_used: int = 0
     error_message: str = ""
-    last_action: str = ""
-    message: str = ""
 
 
 ResultViewModel = (
