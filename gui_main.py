@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from gui.app_window import launch_gui
+from gui.main_window_v2 import launch_gui
 
 
 def main() -> int:
