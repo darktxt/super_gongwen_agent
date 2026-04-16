@@ -18,11 +18,10 @@ from agents import (
 from agents.items import ItemHelpers, MessageOutputItem, ToolCallOutputItem
 from openai import AsyncOpenAI
 
-from api_gateway.llm_client import LLMRequest, LLMResponse
-from editorial_brain.brain import BrainRunError, BrainRunResult
 from editorial_brain.context_compiler import CompiledBrainContext
 from editorial_brain.contracts_core import BrainStepResult
 from editorial_brain.output_parser import OutputParseError, OutputParser
+from editorial_brain.runtime_contracts import BrainRunError, BrainRunResult, LLMRequest, LLMResponse
 
 from .models import AgentBrainStepOutput
 
@@ -47,7 +46,8 @@ class AgentsSdkBrainRunner:
         self.timeout = float(timeout)
         self.temperature = temperature
         self.enable_tracing = bool(enable_tracing)
-        self.output_mode = self._resolve_output_mode(output_mode)
+        self.configured_output_mode = str(output_mode or "auto").strip().lower()
+        self.output_mode = self._resolve_output_mode(self.configured_output_mode)
         self.workflow_name = str(workflow_name or "super-gongwen-agent").strip()
         self.app_home = Path(app_home).expanduser().resolve()
         self._session_db_path = self.app_home / "agents_runtime" / "sessions.sqlite3"
@@ -118,7 +118,11 @@ class AgentsSdkBrainRunner:
             )
             return BrainRunResult(request=request, response=response, step=step)
         except Exception as exc:
-            fallback_step = self._try_parse_fallback_step(str(exc))
+            fallback_step = self._try_recover_step_from_exception(
+                exc,
+                request=request,
+                session_id=session_id,
+            )
             if fallback_step is not None:
                 payload = fallback_step.to_dict()
                 response = LLMResponse(
@@ -229,7 +233,7 @@ class AgentsSdkBrainRunner:
             max_turns=1,
             session=self._build_session(session_id),
             run_config=self._build_run_config(session_id),
-            )
+        )
 
     def _render_user_content(self, request: LLMRequest) -> str:
         lines = [request.user_prompt.strip()]
@@ -259,6 +263,28 @@ class AgentsSdkBrainRunner:
         except OutputParseError:
             return None
 
+    def _try_recover_step_from_exception(
+        self,
+        exc: Exception,
+        *,
+        request: LLMRequest,
+        session_id: str | None,
+    ) -> BrainStepResult | None:
+        error_text = str(exc or "").strip()
+        if not error_text:
+            return None
+        direct = self._try_parse_fallback_step(error_text)
+        if direct is not None:
+            return direct
+        try:
+            return self._parse_text_payload_with_repair(
+                error_text,
+                request=request,
+                session_id=session_id,
+            )
+        except Exception:
+            return None
+
     def _coerce_run_result_payload(
         self,
         result: Any,
@@ -267,7 +293,10 @@ class AgentsSdkBrainRunner:
         session_id: str | None,
     ) -> dict[str, Any]:
         if self.output_mode == "structured":
-            final_output = result.final_output_as(AgentBrainStepOutput, raise_if_incorrect_type=True)
+            final_output = result.final_output_as(
+                AgentBrainStepOutput,
+                raise_if_incorrect_type=True,
+            )
             return final_output.to_brain_step_dict()
 
         raw_text = self._extract_text_output(result)
@@ -304,9 +333,8 @@ class AgentsSdkBrainRunner:
     def _resolve_output_mode(self, configured_output_mode: str) -> str:
         normalized = str(configured_output_mode or "auto").strip().lower()
         if normalized == "auto":
-            # 兼容网关经常返回 <think> + JSON 或混合文本，文本模式更稳；
-            # 官方直连默认保留结构化输出能力。
-            return "text" if self.base_url else "structured"
+            # 默认优先结构化输出；若供应商行为不稳定，再通过异常恢复与修复链路兜底。
+            return "structured"
         if normalized in {"structured", "text"}:
             return normalized
         return "structured"
@@ -315,7 +343,14 @@ class AgentsSdkBrainRunner:
         normalized = str(instructions or "").strip()
         if self.output_mode != "text":
             return normalized
-        compatibility_suffix = "\n\n兼容输出模式补充要求：\n1. 最终回答必须包含且只包含一个可解析的 JSON object。\n2. 不要输出自然语言解释、不要只输出分析结论。\n3. 即使模型会生成 <think> 或推理内容，你也必须在最后给出完整 JSON object。\n4. 如果当前最合适的是 ask_user、write_draft、revise_draft 或 finalize，也必须严格按 BrainStepResult JSON 输出。"
+        compatibility_suffix = (
+            "\n\n兼容输出模式补充要求：\n"
+            "1. 最终回答必须包含且只包含一个可解析的 JSON object。\n"
+            "2. 不要输出自然语言解释、不要只输出分析结论。\n"
+            "3. 即使模型会生成 <think> 或推理内容，你也必须在最后给出完整 JSON object。\n"
+            "4. 如果当前最合适的是 ask_user、write_draft、revise_draft 或 finalize，"
+            "也必须严格按 BrainStepResult JSON 输出。"
+        )
         return normalized + compatibility_suffix
 
     def _parse_text_payload_with_repair(
@@ -370,9 +405,12 @@ class AgentsSdkBrainRunner:
         return Agent(
             name="EditorialBrainJsonRepair",
             instructions=(
-                "你是一个 JSON 修复器。你的唯一任务是把上一个模型输出修正为合法的 BrainStepResult JSON。"
-                "你必须只输出一个 JSON object，不得输出解释、不得输出 Markdown、不得只输出分析。"
-                "如果原始输出包含 <think>、自然语言分析、代码块或半截 JSON，请提取其中真实意图并补成完整 JSON。"
+                "你是一个 JSON 修复器。你的唯一任务是把上一个模型输出修正为合法的 "
+                "BrainStepResult JSON。"
+                "你必须只输出一个 JSON object，不得输出解释、不得输出 Markdown、"
+                "不得只输出分析。"
+                "如果原始输出包含 <think>、自然语言分析、代码块或半截 JSON，"
+                "请提取其中真实意图并补成完整 JSON。"
             ),
             model=self._model,
             output_type=None,
@@ -391,7 +429,8 @@ class AgentsSdkBrainRunner:
             model=self.model_name,
             system_prompt="请将给定内容修正为合法 BrainStepResult JSON。",
             user_prompt=(
-                "下面是上一轮模型的原始输出。请保留其动作意图，修复为一个合法的 BrainStepResult JSON。"
+                "下面是上一轮模型的原始输出。请保留其动作意图，修复为一个合法的 "
+                "BrainStepResult JSON。"
             ),
             context_blocks=[
                 {
@@ -416,4 +455,51 @@ class AgentsSdkBrainRunner:
                 },
             ],
             metadata={"runtime_backend": "agents_sdk", "repair_mode": True},
+        )
+
+
+class UnconfiguredAgentsSdkBrainRunner:
+    def __init__(self, *, reason: str, model: str = "editorial-brain") -> None:
+        self.reason = str(reason or "").strip() or "Agents SDK runtime is not configured."
+        self.model_name = str(model or "editorial-brain").strip()
+        self.output_mode = "structured"
+        self.configured_output_mode = "auto"
+
+    def run(
+        self,
+        compiled_context: CompiledBrainContext,
+        *,
+        session_id: str | None = None,
+    ) -> BrainRunResult:
+        request = LLMRequest(
+            model=self.model_name,
+            system_prompt=compiled_context.system_prompt,
+            user_prompt=compiled_context.user_prompt,
+            context_blocks=[
+                compiled_context.action_playbook_block.to_dict(),
+                compiled_context.skill_listing_block.to_dict(),
+            ]
+            + [block.to_dict() for block in compiled_context.active_skill_blocks]
+            + [block.to_dict() for block in compiled_context.attached_context_blocks],
+            metadata={
+                "token_budget_report": compiled_context.token_budget_report.to_dict(),
+                "runtime_backend": "agents_sdk",
+                "session_id": session_id or "",
+            },
+        )
+        response = LLMResponse(
+            content="",
+            model=self.model_name,
+            raw_payload={
+                "sdk": "openai-agents",
+                "runtime_backend": "agents_sdk",
+                "session_id": session_id or "",
+                "error": self.reason,
+            },
+        )
+        raise BrainRunError(
+            message=self.reason,
+            request=request,
+            response=response,
+            raw_output="",
         )

@@ -4,9 +4,8 @@ import json
 import re
 from typing import Any, Mapping
 
-from api_gateway.llm_client import LLMResponse
-
 from .contracts_core import BrainStepResult
+from .runtime_contracts import LLMResponse
 
 
 class OutputParseError(ValueError):

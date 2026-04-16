@@ -173,7 +173,7 @@ def _coerce_text_blob(value: Any) -> str:
 
 def _extract_action_main_text(payload: Any) -> str:
     normalized = _as_mapping(payload)
-    text = _extract_legacy_draft_text(normalized)
+    text = _extract_compatible_draft_text(normalized)
     if text:
         return text
     return _coerce_text_blob(payload)
@@ -356,15 +356,22 @@ def _normalize_question_item(item: Any, index: int) -> dict[str, Any] | None:
         normalized = _as_mapping(item)
         question = _extract_textish(
             normalized,
-            ("question", "prompt", "question_text", "text", "content"),
+            (
+                "question",
+                "prompt",
+                "question_text",
+                "text",
+                "content",
+                "primary_question",
+            ),
         )
         why_needed = _extract_textish(
             normalized,
-            ("why_needed", "why", "reason"),
+            ("why_needed", "why", "reason", "context_needed"),
         )
         expected_format = _extract_textish(
             normalized,
-            ("expected_format", "format", "answer_format"),
+            ("expected_format", "format", "answer_format", "fallback_strategy"),
         )
         target_slot = _extract_textish(
             normalized,
@@ -1127,12 +1134,12 @@ def _normalize_draft_action_payload(
         if action_taken == "finalize":
             return {"final_text": direct_text}
 
-    legacy_draft = _as_mapping(workspace_patch.get("draft_update"))
-    text = _extract_legacy_draft_text(legacy_draft)
+    compatible_draft = _as_mapping(workspace_patch.get("draft_update"))
+    text = _extract_compatible_draft_text(compatible_draft)
     if action_taken == "write_draft":
         return {"draft_text": text}
     if action_taken == "write_section":
-        section_map = _as_mapping(legacy_draft.get("section_map"))
+        section_map = _as_mapping(compatible_draft.get("section_map"))
         section_id = ""
         section_text = ""
         if len(section_map) == 1:
@@ -1147,7 +1154,7 @@ def _normalize_draft_action_payload(
     return {}
 
 
-def _extract_legacy_draft_text(payload: Mapping[str, Any]) -> str:
+def _extract_compatible_draft_text(payload: Mapping[str, Any]) -> str:
     text = _extract_textish(
         payload,
         (
@@ -1218,7 +1225,7 @@ def _normalize_action_payload_mapping(
             "outline_sections": _normalize_outline_sections(normalized.get("outline_sections")),
         }
     if action_taken == "write_draft":
-        return {"draft_text": _extract_legacy_draft_text(normalized)}
+        return {"draft_text": _extract_compatible_draft_text(normalized)}
     if action_taken == "write_section":
         section_id = _extract_textish(
             normalized,
@@ -1233,9 +1240,9 @@ def _normalize_action_payload_mapping(
             "section_text": section_text,
         }
     if action_taken == "revise_draft":
-        return {"revised_text": _extract_legacy_draft_text(normalized)}
+        return {"revised_text": _extract_compatible_draft_text(normalized)}
     if action_taken == "polish_language":
-        return {"polished_text": _extract_legacy_draft_text(normalized)}
+        return {"polished_text": _extract_compatible_draft_text(normalized)}
     if action_taken == "ask_user":
         return {
             "question_pack": _normalize_question_pack(
@@ -1246,7 +1253,7 @@ def _normalize_action_payload_mapping(
             )
         }
     if action_taken == "finalize":
-        return {"final_text": _extract_legacy_draft_text(normalized)}
+        return {"final_text": _extract_compatible_draft_text(normalized)}
     return normalized
 
 

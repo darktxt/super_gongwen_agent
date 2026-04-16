@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
@@ -6,17 +6,16 @@ from pathlib import Path
 import re
 from typing import Any, Callable
 
-from agents_runtime import AgentsSdkBrainRunner
-from api_gateway.llm_client import LLMClient, OpenAICloudLLMClient, UnconfiguredLLMClient
 from config import AppConfig, load_config
-from editorial_brain.brain import BrainRunError, BrainRunner
 from editorial_brain.context_compiler import ContextCompiler
 from editorial_brain.contracts_core import BrainStepResult, CONTROL_ONLY_ACTIONS
 from editorial_brain.output_parser import OutputParseError
 from editorial_brain.quality_gate_v2 import QualityGate, QualityGateError
+from editorial_brain.runtime_contracts import BrainRunError
 from observability.events import ObservabilityEventWriter
 from observability.logger import build_app_logger, log_structured
 from observability.metrics import MetricsCollector
+from runtime_factory import build_brain_runner
 from session_storage.paths import build_session_paths
 from session_storage.history import initialize_session_storage, save_final_output
 from skill_system.catalog import SkillCatalog
@@ -60,7 +59,6 @@ class SuperGongwenApp:
         self,
         config: AppConfig | None = None,
         *,
-        llm_client: LLMClient | None = None,
         skill_catalog: SkillCatalog | None = None,
         skill_tool: SkillTool | None = None,
         skill_guard: SkillSelectionGuard | None = None,
@@ -85,14 +83,7 @@ class SuperGongwenApp:
         self.tool_registry = tool_registry or ToolRegistry.build_default()
         self.tool_executor = tool_executor or ToolExecutor(self.tool_registry)
         self.context_compiler = context_compiler or ContextCompiler()
-        self.runtime_backend = self.config.runtime_backend
-        if self.runtime_backend == "legacy":
-            self.llm_client = llm_client or self._build_default_llm_client()
-        else:
-            self.llm_client = llm_client or UnconfiguredLLMClient(
-                "Legacy LLM client is disabled while Agents SDK runtime is active."
-            )
-        self.brain_runner = brain_runner or self._build_default_brain_runner()
+        self.brain_runner = brain_runner or build_brain_runner(config=self.config)
         self.quality_gate = quality_gate or QualityGate()
         self.workspace_patcher = workspace_patcher or WorkspacePatcher()
         self.logger = logger or build_app_logger()
@@ -1366,7 +1357,7 @@ class SuperGongwenApp:
             if section_id and section_text:
                 previous_text = str(workspace.draft_artifact.section_map.get(section_id, "") or "")
                 workspace.draft_artifact.section_map[section_id] = section_text
-                transition_state = "legacy_fallback"
+                transition_state = "append_fallback"
                 (
                     workspace.draft_artifact.full_text,
                     workspace.draft_artifact.assembly_mode,
@@ -1560,13 +1551,13 @@ class SuperGongwenApp:
             if rendered:
                 return rendered, "sectional", "promoted_from_full_text"
         return (
-            self._merge_section_text_legacy(
+            self._merge_section_text_append_fallback(
                 workspace.draft_artifact.full_text,
                 previous_text,
                 section_text,
             ),
             "full_text",
-            "legacy_fallback",
+            "append_fallback",
         )
 
     def _build_baseline_section_map(
@@ -1804,7 +1795,7 @@ class SuperGongwenApp:
     def _normalize_text(self, text: str) -> str:
         return " ".join(str(text or "").split())
 
-    def _merge_section_text_legacy(
+    def _merge_section_text_append_fallback(
         self,
         full_text: str,
         previous_text: str,
@@ -1820,40 +1811,6 @@ class SuperGongwenApp:
         if old_section and old_section in existing_full_text:
             return existing_full_text.replace(old_section, new_section, 1)
         return existing_full_text.rstrip() + "\n\n" + new_section
-
-    def _build_default_llm_client(self) -> LLMClient:
-        missing: list[str] = []
-        if not self.config.openai_api_key:
-            missing.append("OPENAI_API_KEY")
-        if not self.config.openai_model:
-            missing.append("OPENAI_MODEL")
-        if not missing:
-            return OpenAICloudLLMClient.from_config(self.config)
-        return UnconfiguredLLMClient(
-            "LLM client is not configured for run_turn. Missing: " + ", ".join(missing)
-        )
-
-    def _build_default_brain_runner(self) -> Any:
-        if self.runtime_backend == "agents_sdk":
-            missing: list[str] = []
-            if not self.config.openai_api_key:
-                missing.append("OPENAI_API_KEY")
-            if not self.config.openai_model:
-                missing.append("OPENAI_MODEL")
-            if missing:
-                return BrainRunner(
-                    UnconfiguredLLMClient(
-                        "Agents SDK runtime is not configured for run_turn. Missing: "
-                        + ", ".join(missing)
-                    ),
-                    model=self.config.openai_model or "editorial-brain",
-                )
-            return AgentsSdkBrainRunner.from_config(self.config)
-
-        return BrainRunner(
-            self.llm_client,
-            model=self.config.openai_model or "editorial-brain",
-        )
 
     def _record_runtime_event(
         self,
