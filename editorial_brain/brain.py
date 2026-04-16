@@ -39,7 +39,12 @@ class BrainRunner:
         self.model = model
         self.output_parser = output_parser or OutputParser()
 
-    def run(self, compiled_context: CompiledBrainContext) -> BrainRunResult:
+    def run(
+        self,
+        compiled_context: CompiledBrainContext,
+        *,
+        session_id: str | None = None,
+    ) -> BrainRunResult:
         request = LLMRequest(
             model=self.model,
             system_prompt=compiled_context.system_prompt,

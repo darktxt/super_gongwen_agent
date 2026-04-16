@@ -27,10 +27,11 @@
 
 ```text
 main.py                 CLI 入口
-app.py                  应用编排中心
+app.py                  应用编排中心（应用装配与运行时协调）
 config.py               环境配置加载
 
 api_gateway/            LLM 客户端抽象与 OpenAI 兼容实现
+agents_runtime/         OpenAI Agents SDK 运行时适配层
 editorial_brain/        上下文拼装、动作协议、LLM 调用、质量门禁
 workspace/              工作区状态模型、快照、patch 应用、持久化
 tool_runtime/           材料读取与工具执行框架
@@ -42,8 +43,14 @@ materials/              用户提供的写作材料目录
 utils/                  时间、序列化、session id 等基础工具
 ```
 
-其中最核心的编排节点是 [app.py](./app.py)。  
-当前它承担了依赖装配、单轮运行调度、事件记录、错误归一和结果落盘等职责，是整个系统的 orchestration center。
+其中最核心的编排节点仍是 [app.py](./app.py)。  
+但在新的分层下，它不再独占全部 LLM 运行时细节，而是主要负责：
+
+- 应用装配与运行时选择；
+- 单轮执行主链路协调；
+- 事件记录、错误归一与结果落盘。
+
+与之对应，`agents_runtime/` 负责 OpenAI Agents SDK 的初始化、session 接入、结构化输出与 tracing 适配。
 
 ## 4. 核心分层
 
@@ -275,7 +282,13 @@ Final Output / Follow-up Question
 1. 让 `editorial_brain` 不依赖具体供应商 SDK 细节；
 2. 在环境变量缺失时快速失败，避免系统静默退化。
 
-因此当前项目虽然默认走 OpenAI 兼容接口，但调用层已经与上层编排解耦。
+因此当前项目虽然仍保留 OpenAI 兼容接口抽象，但默认运行时已升级为 OpenAI Agents SDK：
+
+- `legacy` 运行时：通过 `api_gateway/llm_client.py` 的 `chat.completions` 路径驱动；
+- `agents_sdk` 运行时：通过 `agents_runtime/brain_runner.py` 使用 OpenAI Agents SDK、结构化输出与 SQLite session；
+- 两种运行时都尽量复用同一套 `workspace`、工具层与会话落盘逻辑。
+
+这样做的目标不是放弃原有领域建模，而是把底层运行时编排交给更成熟的 SDK，把自研精力集中在公文写作领域能力上。
 
 ## 8. 为什么采用“状态驱动”而不是“纯对话驱动”
 

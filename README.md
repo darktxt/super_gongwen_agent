@@ -65,6 +65,9 @@ OPENAI_BASE_URL=
 OPENAI_MODEL=
 OPENAI_TIMEOUT=300
 OPENAI_TEMPERATURE=
+OPENAI_AGENTS_ENABLE_TRACING=1
+OPENAI_AGENTS_OUTPUT_MODE=auto
+SUPER_GONGWEN_RUNTIME=agents_sdk
 SUPER_GONGWEN_HOME=
 ```
 
@@ -75,7 +78,36 @@ SUPER_GONGWEN_HOME=
 - `OPENAI_API_KEY`：必填，OpenAI 兼容接口的密钥。
 - `OPENAI_BASE_URL`：可选，自定义兼容网关时填写；直连官方接口可留空。
 - `OPENAI_MODEL`：必填，运行 `run_turn` 时使用的模型名。
+- `OPENAI_AGENTS_ENABLE_TRACING`：可选，是否启用 Agents SDK tracing，默认开启。
+- `OPENAI_AGENTS_OUTPUT_MODE`：可选，支持 `auto`、`structured`、`text`。默认 `auto`。
+- `SUPER_GONGWEN_RUNTIME`：可选，运行时后端，支持 `agents_sdk` 与 `legacy`，默认 `agents_sdk`。
 - `SUPER_GONGWEN_HOME`：可选，指定运行态数据目录；默认写入当前目录下的 `.super_gongwen/`。
+
+## 运行时说明
+
+当前仓库默认使用 OpenAI Agents SDK 作为运行时编排内核，但仍保留现有领域层：
+
+- `workspace/` 继续作为公文写作状态的事实源。
+- `tool_runtime/` 继续负责受控材料读取，读取边界仍限制在 `materials/`。
+- `session_storage/`、`result_assembler/`、终稿导出与 GUI/CLI 入口继续沿用现有工程层。
+
+运行时切换策略：
+
+- `SUPER_GONGWEN_RUNTIME=agents_sdk`：启用新的 Agents SDK 运行时。
+- `SUPER_GONGWEN_RUNTIME=legacy`：回退到原有 `chat.completions + 自定义解析` 运行时。
+
+Agents SDK 输出模式：
+
+- `OPENAI_AGENTS_OUTPUT_MODE=auto`：默认策略；若配置了 `OPENAI_BASE_URL`，自动切到 `text` 模式，否则默认走 `structured`。
+- `OPENAI_AGENTS_OUTPUT_MODE=structured`：优先使用 SDK 结构化输出，适合官方直连或稳定支持 schema 的供应商。
+- `OPENAI_AGENTS_OUTPUT_MODE=text`：由 Agents SDK 负责运行时编排，但最终文本统一交给项目内 JSON 解析器处理，适合 `<think> + json`、代码块 JSON、混合文本等兼容网关场景。
+
+兼容性说明：
+
+- `create_app()`、`bootstrap()`、`run_turn()` 的对外调用语义保持兼容。
+- 当前 Agents SDK 运行时会额外把运行时 session 持久化到 `.super_gongwen/agents_runtime/sessions.sqlite3`，但不会替代 `workspace.json`。
+- `OPENAI_BASE_URL` 仍可用于接入 OpenAI 兼容网关；实际是否完全兼容取决于目标网关对 Chat Completions 语义的支持程度。
+- 对兼容网关，运行时会优先采用 `text` 模式，并在需要时自动执行一次 JSON 修复回合，以处理“只有分析没有 JSON”这类非标准输出。
 
 ## 材料目录
 

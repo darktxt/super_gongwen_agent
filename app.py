@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import Any, Callable
 
+from agents_runtime import AgentsSdkBrainRunner
 from api_gateway.llm_client import LLMClient, OpenAICloudLLMClient, UnconfiguredLLMClient
 from config import AppConfig, load_config
 from editorial_brain.brain import BrainRunError, BrainRunner
@@ -66,7 +67,7 @@ class SuperGongwenApp:
         tool_registry: ToolRegistry | None = None,
         tool_executor: ToolExecutor | None = None,
         context_compiler: ContextCompiler | None = None,
-        brain_runner: BrainRunner | None = None,
+        brain_runner: Any | None = None,
         quality_gate: QualityGate | None = None,
         workspace_patcher: WorkspacePatcher | None = None,
         logger: logging.Logger | None = None,
@@ -84,11 +85,14 @@ class SuperGongwenApp:
         self.tool_registry = tool_registry or ToolRegistry.build_default()
         self.tool_executor = tool_executor or ToolExecutor(self.tool_registry)
         self.context_compiler = context_compiler or ContextCompiler()
-        self.llm_client = llm_client or self._build_default_llm_client()
-        self.brain_runner = brain_runner or BrainRunner(
-            self.llm_client,
-            model=self.config.openai_model or "editorial-brain",
-        )
+        self.runtime_backend = self.config.runtime_backend
+        if self.runtime_backend == "legacy":
+            self.llm_client = llm_client or self._build_default_llm_client()
+        else:
+            self.llm_client = llm_client or UnconfiguredLLMClient(
+                "Legacy LLM client is disabled while Agents SDK runtime is active."
+            )
+        self.brain_runner = brain_runner or self._build_default_brain_runner()
         self.quality_gate = quality_gate or QualityGate()
         self.workspace_patcher = workspace_patcher or WorkspacePatcher()
         self.logger = logger or build_app_logger()
@@ -195,7 +199,7 @@ class SuperGongwenApp:
                     round_no=rounds_used,
                 )
                 try:
-                    brain_result = self.brain_runner.run(compiled)
+                    brain_result = self.brain_runner.run(compiled, session_id=session_id)
                 except BrainRunError as exc:
                     last_llm_raw_output = exc.raw_output
                     self.metrics.increment("parse_error_count")
@@ -1827,6 +1831,28 @@ class SuperGongwenApp:
             return OpenAICloudLLMClient.from_config(self.config)
         return UnconfiguredLLMClient(
             "LLM client is not configured for run_turn. Missing: " + ", ".join(missing)
+        )
+
+    def _build_default_brain_runner(self) -> Any:
+        if self.runtime_backend == "agents_sdk":
+            missing: list[str] = []
+            if not self.config.openai_api_key:
+                missing.append("OPENAI_API_KEY")
+            if not self.config.openai_model:
+                missing.append("OPENAI_MODEL")
+            if missing:
+                return BrainRunner(
+                    UnconfiguredLLMClient(
+                        "Agents SDK runtime is not configured for run_turn. Missing: "
+                        + ", ".join(missing)
+                    ),
+                    model=self.config.openai_model or "editorial-brain",
+                )
+            return AgentsSdkBrainRunner.from_config(self.config)
+
+        return BrainRunner(
+            self.llm_client,
+            model=self.config.openai_model or "editorial-brain",
         )
 
     def _record_runtime_event(

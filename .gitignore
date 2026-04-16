@@ -13,3 +13,4 @@ env/
 .super_gongwen/
 *.log
 openspec/
+tests

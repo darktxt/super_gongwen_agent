@@ -19,6 +19,9 @@ class AppConfig:
     app_home: Path
     sessions_root: Path
     default_encoding: str = "utf-8"
+    runtime_backend: str = "agents_sdk"
+    openai_agents_enable_tracing: bool = True
+    openai_agents_output_mode: str = "auto"
     openai_api_key: str = ""
     openai_base_url: str = ""
     openai_model: str = ""
@@ -46,6 +49,15 @@ def load_config(base_dir: str | Path | None = None) -> AppConfig:
     return AppConfig(
         app_home=app_home,
         sessions_root=sessions_root,
+        runtime_backend=_read_runtime_backend_env("SUPER_GONGWEN_RUNTIME", default="agents_sdk"),
+        openai_agents_enable_tracing=_read_bool_env(
+            "OPENAI_AGENTS_ENABLE_TRACING",
+            default=True,
+        ),
+        openai_agents_output_mode=_read_agents_output_mode_env(
+            "OPENAI_AGENTS_OUTPUT_MODE",
+            default="auto",
+        ),
         openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
         openai_base_url=os.getenv("OPENAI_BASE_URL", "").strip(),
         openai_model=os.getenv("OPENAI_MODEL", "").strip(),
@@ -127,3 +139,28 @@ def _read_optional_float_env(name: str) -> float | None:
         return float(raw_value)
     except ValueError:
         return None
+
+
+def _read_bool_env(name: str, *, default: bool) -> bool:
+    raw_value = os.getenv(name, "").strip().lower()
+    if not raw_value:
+        return default
+    if raw_value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _read_runtime_backend_env(name: str, *, default: str) -> str:
+    raw_value = os.getenv(name, "").strip().lower()
+    if raw_value in {"legacy", "agents_sdk"}:
+        return raw_value
+    return default
+
+
+def _read_agents_output_mode_env(name: str, *, default: str) -> str:
+    raw_value = os.getenv(name, "").strip().lower()
+    if raw_value in {"auto", "structured", "text"}:
+        return raw_value
+    return default
