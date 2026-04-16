@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
 import json
 
-from tool_runtime.registry import MATERIAL_TOOL_NAMES
+from agents_runtime.tools import MATERIAL_TOOL_NAMES
 from utils.serialization import JsonDataclassMixin
 from workspace.snapshot import WorkspaceSnapshot
 
@@ -43,6 +43,7 @@ TOOL_PURPOSES = {
     "list": "查看 materials 目录下的文件清单。",
     "read": "读取 materials 中的指定文件或指定片段。",
     "search": "在 materials 中按主题搜索相关材料。",
+    "shell": "通过 Agents SDK 原生 shell 在 materials 内执行 rg / Get-Content 等只读命令。",
 }
 
 TOOL_DEFAULT_ARGUMENTS = {
@@ -52,12 +53,17 @@ TOOL_DEFAULT_ARGUMENTS = {
 }
 
 TOOL_RECIPES = {
-    "read_materials": [
+    "material_tools": [
         "先 search 再 read，适合按主题找参考材料。",
         "先 list 再 read，适合先看材料清单再挑文件。",
         "先 search 或 list，必要时 grep，再 read 关键片段。",
         "如果 search 返回 0 但 list 已发现候选文件，优先直接 read 这些文件，不要继续重复空搜索。",
-    ]
+    ],
+    "shell_tools": [
+        "先用 rg --files materials 看材料清单，再决定读哪份文件。",
+        "先用 rg --json -n -i 检索关键词，再用 Get-Content 读取命中的文件或片段。",
+        "只在 materials 目录内做只读访问，不要访问其他路径。",
+    ],
 }
 
 TOOL_ARGUMENT_SCHEMAS = {
@@ -165,7 +171,7 @@ class ContextCompiler:
                 latest_message,
                 "",
                 "请基于全部上下文选择当前最合适的一个 action，并输出一个合法的 BrainStepResult JSON。",
-                "优先按这个顺序判断：先看是否需要补证据或读材，再看是否需要 skill，然后决定是提纲、正文、分节、修订、润色还是定稿。",
+                "优先按这个顺序判断：先看是否需要补证据并调用工具，再看是否需要 skill，然后决定是提纲、正文、分节、修订、润色还是定稿。",
                 "如果一般缺口可合理补齐，不要 ask_user；如果硬约束未满足，不要 finalize。",
             ]
         )
@@ -354,7 +360,7 @@ class ContextCompiler:
             field_notes=[
                 ("recent_queries", "最近几次与读材相关的查询或关键词。"),
                 ("recent_source_paths", "最近检索命中或正文读取涉及的材料来源路径。"),
-                ("latest_call_summary", "最近一次 read_materials 的请求结构、结果增量与证据变化摘要。"),
+                ("latest_call_summary", "最近一次工具读材的请求结构、结果增量与证据变化摘要。"),
                 ("recent_excerpts", "最近较重要的材料片段与线索，保留 tool_name 以标识其来源。"),
             ],
             current_value=current_value,
@@ -576,6 +582,44 @@ class ContextCompiler:
             str(self._normalize_json_value(tool).get("name", "") or ""): self._normalize_json_value(tool)
             for tool in snapshot.available_tools
         }
+        if "shell" in tool_index:
+            shell_tool = tool_index["shell"]
+            return self._make_semantic_block(
+                title="Available Tools",
+                purpose="当前材料访问走 Agents SDK 原生 shell。",
+                field_notes=[],
+                current_value={
+                    "tool_use_policy": {
+                        "available_material_tools": ["shell"],
+                        "fallback_function_tools": list(MATERIAL_TOOL_NAMES),
+                        "materials_access_rule": "只允许在 materials 内执行只读 shell 命令。",
+                        "preferred_tool_flow": TOOL_RECIPES["shell_tools"],
+                        "recommended_shell_commands": [
+                            "rg --files materials",
+                            "rg --json -n -i --color never \"关键词\" materials",
+                            "Get-Content -LiteralPath 'materials\\\\文件名.txt' -Encoding UTF8 -Raw",
+                            "$lines = Get-Content -LiteralPath 'materials\\\\文件名.txt' -Encoding UTF8; $lines | Select-Object -Skip N -First M",
+                        ],
+                        "avoid_ask_user_when": [
+                            "工作区已有可搜索材料",
+                            "可先用 shell 在 materials 内检索和读取",
+                        ],
+                    },
+                    "tools": [
+                        {
+                            "name": "shell",
+                            "purpose": TOOL_PURPOSES.get("shell", ""),
+                            "is_read_only": bool(shell_tool.get("is_read_only", False)),
+                            "requires_user_interaction": bool(
+                                shell_tool.get("requires_user_interaction", False)
+                            ),
+                        }
+                    ],
+                },
+                token_budget=token_budget,
+                prefer_full=True,
+                hard_char_limit=self.block_char_limit * 2,
+            )
         tools: list[dict[str, Any]] = []
         for name in MATERIAL_TOOL_NAMES:
             normalized = tool_index.get(name)
@@ -599,17 +643,17 @@ class ContextCompiler:
             field_notes=[],
             current_value={
                 "tool_use_policy": {
-                    "read_materials_allowed_tools": list(MATERIAL_TOOL_NAMES),
+                    "available_material_tools": list(MATERIAL_TOOL_NAMES),
                     "materials_access_rule": "search、list、grep 默认只查 materials；read 默认读取 materials 内文件。",
-                    "prefer_read_materials_when": [
+                    "prefer_tool_use_when": [
                         "retrieved_materials 为空且 evidence 很弱",
                         "任务依赖事实、案例、典型做法或原始口径",
                         "当前稿件存在大量 XX 或泛化表述",
                     ],
-                    "preferred_read_materials_flow": TOOL_RECIPES["read_materials"],
+                    "preferred_tool_flow": TOOL_RECIPES["material_tools"],
                     "zero_result_fallback": [
                         "search 结果为 0 不等于 materials 内没有材料",
-                        "如果 list 已发现候选文件，下一轮优先 read 这些文件",
+                        "如果 list 已发现候选文件，优先 read 这些文件",
                         "避免继续使用近似 query 重复空搜索",
                     ],
                     "avoid_ask_user_when": [
@@ -809,13 +853,6 @@ class ContextCompiler:
         must_follow = [str(item).strip() for item in list(directive.get("must_follow", []) or []) if str(item).strip()]
 
         recommended: list[str] = []
-        if (
-            evidence_strength == "weak"
-            and not list(retrieved.get("excerpts", []) or [])
-            and any(keyword in str(snapshot.task_brief or snapshot.latest_user_message or "") for keyword in ("典型", "经验", "汇报", "报告", "发言"))
-        ):
-            recommended.append("read_materials")
-
         if not (
             str(outline.get("outline_text", "") or "").strip()
             or list(outline.get("sections", []) or [])

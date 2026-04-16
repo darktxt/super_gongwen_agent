@@ -3,16 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from tool_runtime.models import ToolRequest
-from tool_runtime.content_access import MATERIALS_DIR_NAME
-from tool_runtime.registry import MATERIAL_TOOL_NAMES
 from utils.serialization import JsonDataclassMixin
 from workspace.models import SelfReview, WorkspacePatch
 
 
 VALID_ACTIONS = {
     "load_skill",
-    "read_materials",
     "build_outline",
     "write_draft",
     "write_section",
@@ -32,11 +28,8 @@ DRAFT_ACTIONS = {
 
 CONTROL_ONLY_ACTIONS = {
     "load_skill",
-    "read_materials",
     "ask_user",
 }
-
-MATERIAL_TOOL_NAME_SET = frozenset(MATERIAL_TOOL_NAMES)
 
 
 _TEXTISH_KEYS = (
@@ -245,11 +238,6 @@ class LoadSkillActionPayload(JsonDataclassMixin):
 
 
 @dataclass(slots=True)
-class ReadMaterialsActionPayload(JsonDataclassMixin):
-    tool_requests: list[ToolRequest] = field(default_factory=list)
-
-
-@dataclass(slots=True)
 class BuildOutlineActionPayload(JsonDataclassMixin):
     outline_text: str = ""
     outline_sections: list[dict[str, Any]] = field(default_factory=list)
@@ -288,7 +276,6 @@ class FinalizeActionPayload(JsonDataclassMixin):
 
 ACTION_PAYLOAD_TYPES = {
     "load_skill": LoadSkillActionPayload,
-    "read_materials": ReadMaterialsActionPayload,
     "build_outline": BuildOutlineActionPayload,
     "write_draft": WriteDraftActionPayload,
     "write_section": WriteSectionActionPayload,
@@ -814,24 +801,6 @@ class BrainStepResult(JsonDataclassMixin):
                 raise ValueError("load_skill allows at most 2 revision_skill_ids.")
             return
 
-        if self.action_taken == "read_materials":
-            tool_requests = _as_list(getattr(self.action_payload, "tool_requests", []))
-            if not tool_requests:
-                raise ValueError("read_materials must produce tool_requests.")
-            unsupported_tool_names: list[str] = []
-            for request in tool_requests:
-                tool_name = str(getattr(request, "tool_name", "") or "").strip()
-                if tool_name and tool_name not in MATERIAL_TOOL_NAME_SET:
-                    unsupported_tool_names.append(tool_name)
-            unsupported_tool_names = sorted(set(unsupported_tool_names))
-            if unsupported_tool_names:
-                allowed = "、".join(MATERIAL_TOOL_NAMES)
-                invalid = "、".join(unsupported_tool_names)
-                raise ValueError(
-                    f"read_materials only allows {allowed}; got {invalid}."
-                )
-            return
-
         if self.action_taken == "ask_user":
             if not _has_items(getattr(self.action_payload, "question_pack", [])):
                 raise ValueError("ask_user must produce question_pack.")
@@ -905,8 +874,6 @@ def _normalize_brain_step_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     if action_taken == "load_skill" and action_payload is None:
         action_payload = normalized.get("skill_request")
-    elif action_taken == "read_materials" and action_payload is None:
-        action_payload = normalized.get("tool_requests")
     elif action_taken == "ask_user" and action_payload is None:
         action_payload = normalized.get(
             "question_pack",
@@ -945,10 +912,6 @@ def _normalize_action_payload_value(
 
     if action_taken == "load_skill":
         return _normalize_skill_request_payload(payload) or {}
-    if action_taken == "read_materials":
-        if isinstance(payload, Mapping):
-            return _normalize_action_payload_mapping("read_materials", payload)
-        return {"tool_requests": _normalize_tool_requests(payload)}
     if action_taken == "ask_user":
         if isinstance(payload, Mapping):
             return _normalize_action_payload_mapping("ask_user", payload)
@@ -1203,15 +1166,6 @@ def _normalize_action_payload_mapping(
     if action_taken == "load_skill":
         normalized_skill = _normalize_skill_request_payload(normalized) or {}
         return dict(normalized_skill)
-    if action_taken == "read_materials":
-        return {
-            "tool_requests": _normalize_tool_requests(
-                normalized.get(
-                    "tool_requests",
-                    normalized.get("requests", normalized.get("tool_calls", normalized.get("tools"))),
-                )
-            ),
-        }
     if action_taken == "build_outline":
         if "outline_sections" not in normalized and "sections" in normalized:
             normalized["outline_sections"] = normalized.get("sections")

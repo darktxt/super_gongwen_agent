@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ActionTaken = Literal[
     "load_skill",
-    "read_materials",
     "build_outline",
     "write_draft",
     "write_section",
@@ -22,7 +21,6 @@ class AgentActionPayloadEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     load_skill: "AgentLoadSkillPayload | None" = None
-    read_materials: "AgentReadMaterialsPayload | None" = None
     build_outline: "AgentBuildOutlinePayload | None" = None
     write_draft: "AgentWriteDraftPayload | None" = None
     write_section: "AgentWriteSectionPayload | None" = None
@@ -37,20 +35,6 @@ class AgentLoadSkillPayload(BaseModel):
 
     primary_skill_id: str = ""
     revision_skill_ids: list[str] = Field(default_factory=list)
-
-
-class AgentToolRequestPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    request_id: str = ""
-
-
-class AgentReadMaterialsPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    tool_requests: list[AgentToolRequestPayload] = Field(default_factory=list)
 
 
 class AgentOutlineSectionPayload(BaseModel):

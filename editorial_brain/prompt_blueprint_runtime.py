@@ -12,19 +12,19 @@ def build_editorial_system_prompt() -> str:
             "硬约束：",
             "1. 只输出一个 JSON object，不输出解释文字。",
             "2. 顶层只允许：action_taken、action_payload、workspace_patch、self_review。",
-            "3. load_skill、read_materials、ask_user 是控制动作：不得输出 workspace_patch，不得输出 self_review。",
+            "3. load_skill、ask_user 是控制动作：不得输出 workspace_patch，不得输出 self_review。",
             "4. 正文、提纲、终稿只能放在 action_payload，不要写进 workspace_patch。",
             "5. Workspace 是唯一事实层；不得把未读取的材料写成已确认事实。",
             "6. 如果 must_follow 未满足，或仍有重大 open_gaps，不得 finalize。",
+            "7. 如果缺材料或缺证据，直接调用可用工具；不要输出 read_materials 或 tool_requests。",
             "",
             "决策原则：",
-            "1. 先判断是否缺证据，再判断是否需要 skill，然后决定是提纲、正文、分节、修订、润色还是定稿。",
+            "1. 先判断是否缺证据；如果缺，就先调用工具补材料；再判断是否需要 skill，然后决定是提纲、正文、分节、修订、润色还是定稿。",
             "2. skill 是弱引导，不是前置门槛；只有明显贴题时才 load_skill。",
-            "3. 当 Retrieved Materials 或 Evidence Snapshot 明显不足，且任务依赖事实、案例、做法、口径时，优先考虑 read_materials。",
-            "4. read_materials 只允许使用 search、list、read、grep；优先 search 或 list 找文件，再用 read，必要时再用 grep 精确定位。",
-            "5. search 返回 0 不等于 materials 内无相关材料；如果 list 已发现候选文件，下一步应优先 read 这些文件，而不是重复空搜索。",
-            "6. ask_user 只在缺少关键业务信息且确实不能自行补全时使用，不要因为一般缺口直接 ask_user。",
-            "7. 当前稿件若存在大量 XX、泛化表述或事实空转，应优先补证据或继续修订，不要直接 finalize。",
+            "3. 可用工具只允许 search、list、read、grep；优先 search 或 list 找文件，再用 read，必要时再用 grep 精确定位。",
+            "4. search 返回 0 不等于 materials 内无相关材料；如果 list 已发现候选文件，应优先 read 这些文件，而不是重复空搜索。",
+            "5. ask_user 只在缺少关键业务信息且确实不能自行补全时使用，不要因为一般缺口直接 ask_user。",
+            "6. 当前稿件若存在大量 XX、泛化表述或事实空转，应优先补证据或继续修订，不要直接 finalize。",
             "",
             "输出结构：",
             "1. action_payload 必须采用按 action 名字包一层的写法，例如 action_taken=write_draft 时，写 action_payload.write_draft.draft_text。",
@@ -33,10 +33,9 @@ def build_editorial_system_prompt() -> str:
             "",
             "关键字段提醒：",
             "1. load_skill：必须给出 primary_skill_id；revision_skill_ids 最多 2 个。",
-            "2. read_materials：必须给出 tool_requests，通常 1 到 3 个请求。",
-            "3. ask_user：必须给出 question_pack。",
-            "4. write_draft / revise_draft / polish_language / finalize 分别必须给出 draft_text / revised_text / polished_text / final_text。",
-            "5. self_review 只写当前最重要的问题和缺口，不要写成泛泛总结。",
+            "2. ask_user：必须给出 question_pack。",
+            "3. write_draft / revise_draft / polish_language / finalize 分别必须给出 draft_text / revised_text / polished_text / final_text。",
+            "4. self_review 只写当前最重要的问题和缺口，不要写成泛泛总结。",
         ]
     )
 
@@ -45,14 +44,14 @@ def build_action_playbook() -> str:
     return """Action Policy
 
 总则
-1. 如果当前最缺的是事实、案例、做法、原始口径，优先考虑 read_materials。
+1. 如果当前最缺的是事实、案例、做法、原始口径，先调用工具补材料，再决定最终 action。
 2. 如果当前最缺的是文种写法参考，且某个 skill 明显贴题，可用 load_skill。
 3. 如果结构未定，用 build_outline；如果结构已定但正文为空，用 write_draft。
 4. 如果只需补局部章节，用 write_section；如果需要实质性改写，用 revise_draft。
 5. 如果结构已稳、主要问题是语言和篇幅，用 polish_language。
 6. 只有硬约束满足且无重大未解问题时，才能 finalize。
 
-[read_materials]
+[tools]
 优先使用：
 - Retrieved Materials 为空
 - Evidence Snapshot 很弱或几乎为空
@@ -65,11 +64,8 @@ def build_action_playbook() -> str:
 - 优先 search 或 list 找文件，再用 read 读取片段
 - 只有需要精确定位短语时才补 grep
 - search 返回 0 不等于没有材料
-- 如果 list 已发现候选文件，下一步优先 read 这些文件，不要继续重复近似 search
-
-必须输出：
-- action_payload.read_materials.tool_requests
-- 每个 request 至少包含 tool_name 和 arguments
+- 如果 list 已发现候选文件，优先 read 这些文件，不要继续重复近似 search
+- 工具执行完成后，再输出最终业务 action 的 JSON
 
 推荐模式：
 - search -> read

@@ -17,7 +17,6 @@ from .view_models import (
 class ResultAssembler:
     ACTION_LABELS = {
         "load_skill": "加载写作类型",
-        "read_materials": "读取材料",
         "build_outline": "生成提纲",
         "write_draft": "整稿起草",
         "write_section": "补写章节",
@@ -200,7 +199,7 @@ class ResultAssembler:
         action_label = self.ACTION_LABELS.get(action_taken, action_taken)
         review = self._build_review_view_model(step)
         artifact_title, artifact_text = self._build_artifact_view(step)
-        material_actions, material_names = self._build_material_readout(step, workspace)
+        material_actions, material_names = self._build_material_readout(turn_result, workspace)
         next_step_hint = self._build_next_step_hint(getattr(turn_result, "status", ""), action_taken)
 
         return RoundContextViewModel(
@@ -281,20 +280,20 @@ class ResultAssembler:
 
     def _build_material_readout(
         self,
-        step: object | None,
+        turn_result: object,
         workspace: object | None,
     ) -> tuple[list[str], list[str]]:
-        if str(getattr(step, "action_taken", "") or "").strip() != "read_materials":
+        tool_requests = list(getattr(turn_result, "tool_requests", []) or [])
+        if not tool_requests:
             return [], []
 
-        payload = getattr(step, "action_payload", None)
-        tool_requests = list(getattr(payload, "tool_requests", []) or [])
         action_lines: list[str] = []
         material_names: list[str] = []
 
         for index, request in enumerate(tool_requests, start=1):
-            tool_name = str(getattr(request, "tool_name", "") or "").strip()
-            arguments = dict(getattr(request, "arguments", {}) or {})
+            normalized_request = dict(request or {})
+            tool_name = str(normalized_request.get("tool_name", "") or "").strip()
+            arguments = dict(normalized_request.get("arguments", {}) or {})
             action_lines.append(f"{index}. {self._format_tool_request(tool_name, arguments)}")
             material_names = self._extend_unique(
                 material_names,
@@ -371,8 +370,6 @@ class ResultAssembler:
             return "可直接补充材料、说明要求，或指出要保留/调整的结构。"
         if status in {"failed", "max_rounds_exceeded"}:
             return "建议补充更明确的文种、用途、重点要求，或分步继续修改。"
-        if action_taken == "read_materials":
-            return "系统将基于以上材料继续生成提纲或正文。"
         if action_taken == "load_skill":
             return "可继续读取材料，或直接进入提纲和正文生成。"
         return ""

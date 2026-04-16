@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import Any, Callable
 
+from agents_runtime.tools import list_material_tool_specs
 from config import AppConfig, load_config
 from editorial_brain.context_compiler import ContextCompiler
 from editorial_brain.contracts_core import BrainStepResult, CONTROL_ONLY_ACTIONS
@@ -21,8 +22,6 @@ from session_storage.history import initialize_session_storage, save_final_outpu
 from skill_system.catalog import SkillCatalog
 from skill_system.guard import SkillSelectionGuard
 from skill_system.tool import SkillTool
-from tool_runtime.executor import ToolExecutor
-from tool_runtime.registry import ToolRegistry
 from utils.session_ids import generate_session_id
 from workspace.patcher import WorkspacePatcher
 from workspace.models import DebugRoundSummary, OutlineSection, WorkspaceState
@@ -49,6 +48,8 @@ class TurnRunResult:
     final_output_path: str = ""
     llm_raw_output: str = ""
     question_pack: list[dict[str, Any]] = field(default_factory=list)
+    tool_requests: list[dict[str, Any]] = field(default_factory=list)
+    tool_results: list[dict[str, Any]] = field(default_factory=list)
     step: BrainStepResult | None = None
     workspace: WorkspaceState | None = None
     error_message: str = ""
@@ -62,8 +63,6 @@ class SuperGongwenApp:
         skill_catalog: SkillCatalog | None = None,
         skill_tool: SkillTool | None = None,
         skill_guard: SkillSelectionGuard | None = None,
-        tool_registry: ToolRegistry | None = None,
-        tool_executor: ToolExecutor | None = None,
         context_compiler: ContextCompiler | None = None,
         brain_runner: Any | None = None,
         quality_gate: QualityGate | None = None,
@@ -80,8 +79,6 @@ class SuperGongwenApp:
         self.skill_catalog = skill_catalog or SkillCatalog.from_loader()
         self.skill_tool = skill_tool or SkillTool(self.skill_catalog)
         self.skill_guard = skill_guard or SkillSelectionGuard(self.skill_catalog)
-        self.tool_registry = tool_registry or ToolRegistry.build_default()
-        self.tool_executor = tool_executor or ToolExecutor(self.tool_registry)
         self.context_compiler = context_compiler or ContextCompiler()
         self.brain_runner = brain_runner or build_brain_runner(config=self.config)
         self.quality_gate = quality_gate or QualityGate()
@@ -110,6 +107,15 @@ class SuperGongwenApp:
     def app_home_path(self) -> Path:
         return self.config.app_home
 
+    def _list_available_tools(self) -> list[dict[str, Any]]:
+        if hasattr(self.brain_runner, "list_available_tools"):
+            value = getattr(self.brain_runner, "list_available_tools")
+            if callable(value):
+                tools = value()
+                if isinstance(tools, list):
+                    return [dict(item) for item in tools if isinstance(item, dict)]
+        return list_material_tool_specs()
+
     def run_turn(
         self,
         session_id: str,
@@ -137,12 +143,15 @@ class SuperGongwenApp:
         rounds_used = 0
         last_step: BrainStepResult | None = None
         last_llm_raw_output = ""
+        last_tool_requests: list[dict[str, Any]] = []
+        last_tool_results: list[dict[str, Any]] = []
 
         try:
             for rounds_used in range(1, max_rounds + 1):
                 self._report_user_progress(f"第 {rounds_used} 轮：正在分析需求与材料。")
                 round_debug_files: dict[str, str] = {}
                 workspace_before_summary = self._summarize_workspace(workspace)
+                retrieval_state_before = self._capture_retrieval_state(workspace)
                 self._write_round_debug_file(
                     session_id,
                     rounds_used,
@@ -154,7 +163,7 @@ class SuperGongwenApp:
                     workspace,
                     available_skills=self.skill_catalog.list_cards(),
                     active_skills=self.skill_catalog.get_active_specs(workspace.active_skills),
-                    available_tools=self.tool_registry.list_material_specs(),
+                    available_tools=self._list_available_tools(),
                 )
                 compiled = self.context_compiler.build(snapshot)
                 compiled_summary = self._summarize_compiled_context(compiled)
@@ -190,7 +199,12 @@ class SuperGongwenApp:
                     round_no=rounds_used,
                 )
                 try:
-                    brain_result = self.brain_runner.run(compiled, session_id=session_id)
+                    brain_result = self.brain_runner.run(
+                        compiled,
+                        session_id=session_id,
+                        working_root=self.working_root,
+                        app_home=self.config.app_home,
+                    )
                 except BrainRunError as exc:
                     last_llm_raw_output = exc.raw_output
                     self.metrics.increment("parse_error_count")
@@ -290,7 +304,48 @@ class SuperGongwenApp:
                 )
                 step = brain_result.step
                 last_step = step
-                step_summary = self._summarize_step(step)
+                tool_requests = [
+                    dict(request or {})
+                    for request in list(getattr(brain_result, "tool_requests", []) or [])
+                    if isinstance(request, dict)
+                ]
+                tool_results = [
+                    dict(result or {})
+                    for result in list(getattr(brain_result, "tool_results", []) or [])
+                    if isinstance(result, dict)
+                ]
+                last_tool_requests = list(tool_requests)
+                last_tool_results = list(tool_results)
+                if tool_results:
+                    self.workspace_patcher.apply_tool_results(workspace, tool_results)
+                    self._record_read_materials_round(
+                        workspace,
+                        self._build_read_materials_round_summary(
+                            tool_requests,
+                            tool_results,
+                            retrieval_state_before=retrieval_state_before,
+                            workspace=workspace,
+                        ),
+                    )
+                    self.metrics.increment("tool_call_count", len(tool_results))
+                    self._record_runtime_event(
+                        session_id,
+                        "tool_batch_executed",
+                        level=logging.INFO,
+                        round_no=rounds_used,
+                        tool_names=[
+                            self._tool_request_name(request)
+                            for request in tool_requests
+                            if self._tool_request_name(request)
+                        ],
+                        tool_request_count=len(tool_requests),
+                        tool_result_count=len(tool_results),
+                    )
+                step_summary = self._summarize_step(
+                    step,
+                    workspace=workspace,
+                    tool_requests=tool_requests,
+                )
                 self._report_round_step_progress(rounds_used, step_summary)
                 step_debug_file = self._write_round_debug_file(
                     session_id,
@@ -406,6 +461,8 @@ class SuperGongwenApp:
                             status="continued",
                             rounds_used=rounds_used,
                             llm_raw_output=last_llm_raw_output,
+                            tool_requests=tool_requests,
+                            tool_results=tool_results,
                             step=step,
                             workspace=workspace,
                         )
@@ -416,90 +473,6 @@ class SuperGongwenApp:
                         level=logging.INFO,
                         round_no=rounds_used,
                         reason="after_load_skill",
-                        workspace_summary=workspace_summary,
-                        debug_file=checkpoint_debug_file,
-                    )
-                    continue
-
-                tool_requests = self._resolve_tool_requests(step)
-                if tool_requests:
-                    retrieval_state_before = self._capture_retrieval_state(workspace)
-                    tool_results = self.tool_executor.execute_batch(
-                        tool_requests,
-                        working_root=self.working_root,
-                        session_id=session_id,
-                        app_home=self.config.app_home,
-                    )
-                    self.workspace_patcher.apply_tool_results(workspace, tool_results)
-                    self._record_read_materials_round(
-                        workspace,
-                        self._build_read_materials_round_summary(
-                            tool_requests,
-                            tool_results,
-                            retrieval_state_before=retrieval_state_before,
-                            workspace=workspace,
-                        ),
-                    )
-                    step_summary = self._summarize_step(step, workspace=workspace)
-                    self.metrics.increment("tool_call_count", len(tool_requests))
-                    self._record_runtime_event(
-                        session_id,
-                        "tool_batch_executed",
-                        level=logging.INFO,
-                        round_no=rounds_used,
-                        tool_names=[request.tool_name for request in tool_requests],
-                    )
-                    workspace_summary = self._summarize_workspace(workspace)
-                    self._update_round_debug_state(
-                        workspace,
-                        round_no=rounds_used,
-                        event_name="workspace_checkpoint_saved",
-                        action_taken=step.action_taken,
-                        result_status="continued",
-                        compiled_summary=compiled_summary,
-                        request_summary=request_summary,
-                        response_summary=response_summary,
-                        step_summary=step_summary,
-                        debug_files=round_debug_files,
-                        workspace_summary=workspace_summary,
-                    )
-                    checkpoint_debug_file = self._write_round_debug_file(
-                        session_id,
-                        rounds_used,
-                        "workspace_after_tools",
-                        workspace.to_dict(),
-                        round_debug_files=round_debug_files,
-                    )
-                    self._update_round_debug_state(
-                        workspace,
-                        round_no=rounds_used,
-                        event_name="workspace_checkpoint_saved",
-                        action_taken=step.action_taken,
-                        result_status="continued",
-                        compiled_summary=compiled_summary,
-                        request_summary=request_summary,
-                        response_summary=response_summary,
-                        step_summary=step_summary,
-                        debug_files=round_debug_files,
-                        workspace_summary=workspace_summary,
-                    )
-                    self.workspace_store.save(workspace)
-                    self._report_round_result(
-                        TurnRunResult(
-                            session_id=session_id,
-                            status="continued",
-                            rounds_used=rounds_used,
-                            llm_raw_output=last_llm_raw_output,
-                            step=step,
-                            workspace=workspace,
-                        )
-                    )
-                    self._record_runtime_event(
-                        session_id,
-                        "workspace_checkpoint_saved",
-                        level=logging.INFO,
-                        round_no=rounds_used,
-                        reason="after_tools",
                         workspace_summary=workspace_summary,
                         debug_file=checkpoint_debug_file,
                     )
@@ -566,6 +539,8 @@ class SuperGongwenApp:
                         rounds_used=rounds_used,
                         llm_raw_output=last_llm_raw_output,
                         question_pack=question_pack,
+                        tool_requests=tool_requests,
+                        tool_results=tool_results,
                         step=step,
                         workspace=workspace,
                     )
@@ -671,6 +646,8 @@ class SuperGongwenApp:
                         final_text=gate_result.final_text,
                         final_output_path=final_output_path,
                         llm_raw_output=last_llm_raw_output,
+                        tool_requests=tool_requests,
+                        tool_results=tool_results,
                         step=step,
                         workspace=workspace,
                     )
@@ -711,15 +688,17 @@ class SuperGongwenApp:
                 )
                 self.workspace_store.save(workspace)
                 self._report_round_result(
-                    TurnRunResult(
-                        session_id=session_id,
-                        status="continued",
-                        rounds_used=rounds_used,
-                        llm_raw_output=last_llm_raw_output,
-                        step=step,
-                        workspace=workspace,
+                        TurnRunResult(
+                            session_id=session_id,
+                            status="continued",
+                            rounds_used=rounds_used,
+                            llm_raw_output=last_llm_raw_output,
+                            tool_requests=tool_requests,
+                            tool_results=tool_results,
+                            step=step,
+                            workspace=workspace,
+                        )
                     )
-                )
                 self._record_runtime_event(
                     session_id,
                     "workspace_checkpoint_saved",
@@ -756,6 +735,8 @@ class SuperGongwenApp:
                 status="max_rounds_exceeded",
                 rounds_used=rounds_used,
                 llm_raw_output=last_llm_raw_output,
+                tool_requests=last_tool_requests,
+                tool_results=last_tool_results,
                 step=last_step,
                 workspace=workspace,
                 error_message="Turn exceeded max_rounds before completion.",
@@ -790,6 +771,8 @@ class SuperGongwenApp:
                 status="failed",
                 rounds_used=rounds_used,
                 llm_raw_output=last_llm_raw_output,
+                tool_requests=last_tool_requests,
+                tool_results=last_tool_results,
                 step=last_step,
                 workspace=workspace,
                 error_message=str(exc),
@@ -916,24 +899,33 @@ class SuperGongwenApp:
         step: BrainStepResult,
         *,
         workspace: WorkspaceState | None = None,
+        tool_requests: list[Any] | None = None,
     ) -> dict[str, Any]:
         skill_request = self._resolve_skill_request(step)
-        tool_requests = self._resolve_tool_requests(step)
+        effective_tool_requests = list(tool_requests or [])
         summary = {
             "action_taken": step.action_taken,
             "ask_user": step.ask_user,
             "done": step.done,
             "has_skill_request": skill_request is not None,
-            "tool_request_count": len(tool_requests),
-            "tool_names": [request.tool_name for request in tool_requests],
+            "tool_request_count": len(effective_tool_requests),
+            "tool_names": [
+                self._tool_request_name(request)
+                for request in effective_tool_requests
+                if self._tool_request_name(request)
+            ],
             "outline_update_keys": sorted(step.workspace_patch.outline_update.keys()),
             "revision_history_update_count": len(step.workspace_patch.revision_history_updates),
             "dominant_issue": step.self_review.dominant_issue,
             "open_gaps": list(step.self_review.open_gaps),
-            "output_digest": self._build_output_digest(step, workspace=workspace),
+            "output_digest": self._build_output_digest(
+                step,
+                workspace=workspace,
+                tool_requests=effective_tool_requests,
+            ),
             "patch_digest": self._build_patch_digest(step),
         }
-        if step.action_taken == "read_materials" and workspace is not None:
+        if effective_tool_requests and workspace is not None:
             latest_call = self._latest_read_materials_call(workspace)
             if latest_call:
                 summary["read_materials_summary"] = latest_call
@@ -944,6 +936,7 @@ class SuperGongwenApp:
         step: BrainStepResult,
         *,
         workspace: WorkspaceState | None = None,
+        tool_requests: list[Any] | None = None,
     ) -> str:
         action = str(step.action_taken or "").strip()
         if action == "load_skill":
@@ -963,16 +956,6 @@ class SuperGongwenApp:
                     + "。"
                 )
             return "已请求加载写作 skill：" + primary_skill_id + "。"
-
-        if action == "read_materials":
-            latest_call = self._latest_read_materials_call(workspace) if workspace is not None else {}
-            if latest_call:
-                return self._format_read_materials_output_digest(latest_call)
-            tool_requests = self._resolve_tool_requests(step)
-            tool_names = [request.tool_name for request in tool_requests]
-            if tool_names:
-                return "已发起读材请求，共 " + str(len(tool_requests)) + " 个；工具包括 " + "、".join(tool_names) + "。"
-            return "已发起读材请求，共 " + str(len(tool_requests)) + " 个。"
 
         if action == "build_outline":
             outline_sections = list(getattr(step.action_payload, "outline_sections", []) or [])
@@ -1046,6 +1029,16 @@ class SuperGongwenApp:
             "measure_handles": len(list(workspace.evidence_board.measure_handles or [])),
         }
 
+    def _tool_request_name(self, request: Any) -> str:
+        if isinstance(request, dict):
+            return str(request.get("tool_name", "") or "").strip()
+        return str(getattr(request, "tool_name", "") or "").strip()
+
+    def _tool_request_arguments(self, request: Any) -> dict[str, Any]:
+        if isinstance(request, dict):
+            return dict(request.get("arguments", {}) or {})
+        return dict(getattr(request, "arguments", {}) or {})
+
     def _build_read_materials_round_summary(
         self,
         tool_requests: list[Any],
@@ -1058,7 +1051,7 @@ class SuperGongwenApp:
         result_breakdown: dict[str, dict[str, int]] = {}
 
         for request in tool_requests:
-            tool_name = str(getattr(request, "tool_name", "") or "").strip()
+            tool_name = self._tool_request_name(request)
             if tool_name:
                 request_breakdown[tool_name] = request_breakdown.get(tool_name, 0) + 1
 
@@ -1415,9 +1408,7 @@ class SuperGongwenApp:
         return step.action_payload
 
     def _resolve_tool_requests(self, step: BrainStepResult) -> list[Any]:
-        if step.action_taken != "read_materials":
-            return []
-        return list(getattr(step.action_payload, "tool_requests", []) or [])
+        return []
 
     def _update_workspace_self_review(
         self,

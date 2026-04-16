@@ -9,6 +9,7 @@ from agents import (
     AgentOutputSchema,
     ModelSettings,
     OpenAIChatCompletionsModel,
+    OpenAIResponsesModel,
     RunConfig,
     Runner,
     SQLiteSession,
@@ -24,6 +25,12 @@ from editorial_brain.output_parser import OutputParseError, OutputParser
 from editorial_brain.runtime_contracts import BrainRunError, BrainRunResult, LLMRequest, LLMResponse
 
 from .models import AgentBrainStepOutput
+from .tools import (
+    AgentsToolRuntimeContext,
+    build_material_function_tools,
+    build_material_native_shell_tools,
+    list_material_tool_specs,
+)
 
 
 class AgentsSdkBrainRunner:
@@ -56,17 +63,25 @@ class AgentsSdkBrainRunner:
         self._session_storage_error = ""
         self._fallback_parser = OutputParser()
         self._max_repair_attempts = 1
+        self._max_sdk_turns = 6
         self._client = AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url or None,
             timeout=self.timeout,
         )
-        set_default_openai_api("chat_completions")
+        self.native_shell_enabled = not bool(self.base_url)
+        set_default_openai_api("responses" if self.native_shell_enabled else "chat_completions")
         set_default_openai_client(self._client, use_for_tracing=self.enable_tracing)
-        self._model = OpenAIChatCompletionsModel(
-            model=self.model_name,
-            openai_client=self._client,
-        )
+        if self.native_shell_enabled:
+            self._model = OpenAIResponsesModel(
+                model=self.model_name,
+                openai_client=self._client,
+            )
+        else:
+            self._model = OpenAIChatCompletionsModel(
+                model=self.model_name,
+                openai_client=self._client,
+            )
 
     @classmethod
     def from_config(cls, config: Any) -> "AgentsSdkBrainRunner":
@@ -86,14 +101,22 @@ class AgentsSdkBrainRunner:
         compiled_context: CompiledBrainContext,
         *,
         session_id: str | None = None,
+        working_root: str | Path | None = None,
+        app_home: str | Path | None = None,
     ) -> BrainRunResult:
         request = self._build_request(compiled_context)
         response = LLMResponse(content="", model=self.model_name, raw_payload={})
+        runtime_context = self._build_agents_tool_context(
+            session_id=session_id,
+            working_root=working_root,
+            app_home=app_home,
+        )
         try:
             result = self._run_agent(
                 agent=self._build_agent(compiled_context.system_prompt),
                 request=request,
                 session_id=session_id,
+                runtime_context=runtime_context,
             )
             payload = self._coerce_run_result_payload(
                 result,
@@ -107,16 +130,26 @@ class AgentsSdkBrainRunner:
                 raw_payload={
                     "sdk": "openai-agents",
                     "runtime_backend": "agents_sdk",
+                    "model_api": "responses" if self.native_shell_enabled else "chat_completions",
+                    "native_shell_enabled": self.native_shell_enabled,
                     "output_mode": self.output_mode,
                     "last_response_id": result.last_response_id,
                     "raw_response_count": len(list(result.raw_responses or [])),
                     "final_output": payload,
                     "session_id": session_id or "",
+                    "tool_request_count": len(runtime_context.tool_requests),
+                    "tool_result_count": len(runtime_context.tool_results),
                     "session_storage_available": self._session_storage_available,
                     "session_storage_error": self._session_storage_error,
                 },
             )
-            return BrainRunResult(request=request, response=response, step=step)
+            return BrainRunResult(
+                request=request,
+                response=response,
+                step=step,
+                tool_requests=list(runtime_context.tool_requests),
+                tool_results=list(runtime_context.tool_results),
+            )
         except Exception as exc:
             fallback_step = self._try_recover_step_from_exception(
                 exc,
@@ -129,27 +162,41 @@ class AgentsSdkBrainRunner:
                     content=json.dumps(payload, ensure_ascii=False, indent=2),
                     model=self.model_name,
                     raw_payload={
-                        "sdk": "openai-agents",
-                        "runtime_backend": "agents_sdk",
-                        "output_mode": self.output_mode,
+                    "sdk": "openai-agents",
+                    "runtime_backend": "agents_sdk",
+                    "model_api": "responses" if self.native_shell_enabled else "chat_completions",
+                    "native_shell_enabled": self.native_shell_enabled,
+                    "output_mode": self.output_mode,
                         "fallback_parser_used": True,
                         "session_id": session_id or "",
                         "error_preview": str(exc)[:1200],
+                        "tool_request_count": len(runtime_context.tool_requests),
+                        "tool_result_count": len(runtime_context.tool_results),
                         "session_storage_available": self._session_storage_available,
                         "session_storage_error": self._session_storage_error,
                     },
                 )
-                return BrainRunResult(request=request, response=response, step=fallback_step)
+                return BrainRunResult(
+                    request=request,
+                    response=response,
+                    step=fallback_step,
+                    tool_requests=list(runtime_context.tool_requests),
+                    tool_results=list(runtime_context.tool_results),
+                )
             if not response.content:
                 response = LLMResponse(
                     content="",
                     model=self.model_name,
                     raw_payload={
-                        "sdk": "openai-agents",
-                        "runtime_backend": "agents_sdk",
-                        "output_mode": self.output_mode,
+                    "sdk": "openai-agents",
+                    "runtime_backend": "agents_sdk",
+                    "model_api": "responses" if self.native_shell_enabled else "chat_completions",
+                    "native_shell_enabled": self.native_shell_enabled,
+                    "output_mode": self.output_mode,
                         "session_id": session_id or "",
                         "error": str(exc),
+                        "tool_request_count": len(runtime_context.tool_requests),
+                        "tool_result_count": len(runtime_context.tool_results),
                         "session_storage_available": self._session_storage_available,
                         "session_storage_error": self._session_storage_error,
                     },
@@ -175,7 +222,28 @@ class AgentsSdkBrainRunner:
             metadata={
                 "token_budget_report": compiled_context.token_budget_report.to_dict(),
                 "runtime_backend": "agents_sdk",
+                "material_tool_mode": "native_shell" if self.native_shell_enabled else "function_tool",
             },
+        )
+
+    def _build_agents_tool_context(
+        self,
+        *,
+        session_id: str | None,
+        working_root: str | Path | None,
+        app_home: str | Path | None,
+    ) -> AgentsToolRuntimeContext:
+        resolved_working_root = (
+            Path(working_root).resolve() if working_root is not None else Path.cwd().resolve()
+        )
+        resolved_app_home = (
+            Path(app_home).resolve() if app_home is not None else self.app_home
+        )
+        return AgentsToolRuntimeContext(
+            working_root=resolved_working_root,
+            session_id=session_id,
+            app_home=resolved_app_home,
+            native_shell_enabled=self.native_shell_enabled,
         )
 
     def _build_agent(self, instructions: str) -> Agent[Any]:
@@ -184,13 +252,22 @@ class AgentsSdkBrainRunner:
             output_type = AgentOutputSchema(AgentBrainStepOutput, strict_json_schema=False)
         return Agent(
             name="EditorialBrainCoordinator",
+            tools=(
+                build_material_native_shell_tools() + build_material_function_tools()
+                if self.native_shell_enabled
+                else build_material_function_tools()
+            ),
             instructions=self._build_runtime_instructions(instructions),
             model=self._model,
             output_type=output_type,
+            tool_use_behavior="run_llm_again",
             model_settings=ModelSettings(
                 temperature=self.temperature,
             ),
         )
+
+    def list_available_tools(self) -> list[dict[str, Any]]:
+        return list_material_tool_specs(native_shell=self.native_shell_enabled)
 
     def _build_session(self, session_id: str | None) -> SQLiteSession | None:
         normalized = str(session_id or "").strip()
@@ -226,11 +303,13 @@ class AgentsSdkBrainRunner:
         agent: Agent[Any],
         request: LLMRequest,
         session_id: str | None,
+        runtime_context: AgentsToolRuntimeContext | None = None,
     ) -> Any:
         return Runner.run_sync(
             agent,
             self._render_user_content(request),
-            max_turns=1,
+            context=runtime_context,
+            max_turns=self._max_sdk_turns,
             session=self._build_session(session_id),
             run_config=self._build_run_config(session_id),
         )
@@ -341,6 +420,20 @@ class AgentsSdkBrainRunner:
 
     def _build_runtime_instructions(self, instructions: str) -> str:
         normalized = str(instructions or "").strip()
+        if self.native_shell_enabled:
+            shell_suffix = (
+                "\n\n材料工具补充要求：\n"
+                "1. 当前材料访问工具是 Agents SDK 原生 shell，不是 search/list/read/grep function_tool。\n"
+                "2. 只允许在 materials 目录内做只读访问，不要读取 materials 之外的任何路径。\n"
+                "3. 优先使用这些 Windows PowerShell / rg 模式：\n"
+                "   - 列文件：rg --files materials\n"
+                "   - 关键词定位：rg --json -n -i --color never \"关键词\" materials\n"
+                "   - 读取全文：Get-Content -LiteralPath 'materials\\文件名.txt' -Encoding UTF8 -Raw\n"
+                "   - 读取片段：$lines = Get-Content -LiteralPath 'materials\\文件名.txt' -Encoding UTF8; "
+                "$lines | Select-Object -Skip N -First M\n"
+                "4. 不要输出 tool_requests；需要补材料时直接调用 shell，再继续输出最终 BrainStepResult JSON。\n"
+            )
+            normalized += shell_suffix
         if self.output_mode != "text":
             return normalized
         compatibility_suffix = (
@@ -348,7 +441,8 @@ class AgentsSdkBrainRunner:
             "1. 最终回答必须包含且只包含一个可解析的 JSON object。\n"
             "2. 不要输出自然语言解释、不要只输出分析结论。\n"
             "3. 即使模型会生成 <think> 或推理内容，你也必须在最后给出完整 JSON object。\n"
-            "4. 如果当前最合适的是 ask_user、write_draft、revise_draft 或 finalize，"
+            "4. 如果当前需要补材料，请直接调用可用工具，不要输出 tool_requests。\n"
+            "5. 如果当前最合适的是 ask_user、write_draft、revise_draft 或 finalize，"
             "也必须严格按 BrainStepResult JSON 输出。"
         )
         return normalized + compatibility_suffix
@@ -470,6 +564,8 @@ class UnconfiguredAgentsSdkBrainRunner:
         compiled_context: CompiledBrainContext,
         *,
         session_id: str | None = None,
+        working_root: str | Path | None = None,
+        app_home: str | Path | None = None,
     ) -> BrainRunResult:
         request = LLMRequest(
             model=self.model_name,
@@ -503,3 +599,6 @@ class UnconfiguredAgentsSdkBrainRunner:
             response=response,
             raw_output="",
         )
+
+    def list_available_tools(self) -> list[dict[str, Any]]:
+        return list_material_tool_specs(native_shell=False)

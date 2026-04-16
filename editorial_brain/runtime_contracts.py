@@ -29,6 +29,8 @@ class BrainRunResult:
     request: LLMRequest
     response: LLMResponse
     step: BrainStepResult
+    tool_requests: list[dict[str, Any]] = field(default_factory=list)
+    tool_results: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

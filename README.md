@@ -17,12 +17,12 @@
 .
 ├─ runtime_factory.py    # 运行时装配工厂，负责装配 Agents SDK 运行时
 ├─ editorial_brain/      # 提示编排、动作协议、解析与质量门禁
-├─ materials/            # 写作材料目录，content_access.py 默认从这里读取
+├─ materials/            # 写作材料目录，agents_runtime/materials_fs.py 默认从这里读取
 ├─ observability/        # 运行日志、事件与调试输出
 ├─ result_assembler/     # CLI 结果视图装配
 ├─ session_storage/      # 会话目录、事件流、产物保存
 ├─ skill_system/         # skill 加载、目录、执行与约束
-├─ tool_runtime/         # 材料检索、读取、保存等工具
+├─ agents_runtime/       # Agents SDK 运行时、材料工具、materials 访问与结果落盘
 ├─ utils/                # 序列化、时钟、session id
 ├─ workspace/            # 工作区状态、快照、patch 应用
 ├─ app.py                # 应用编排主入口
@@ -86,7 +86,7 @@ SUPER_GONGWEN_HOME=
 当前仓库已统一使用 OpenAI Agents SDK 作为运行时编排内核，但仍保留现有领域层：
 
 - `workspace/` 继续作为公文写作状态的事实源。
-- `tool_runtime/` 继续负责受控材料读取，读取边界仍限制在 `materials/`。
+- `agents_runtime/` 统一承载 Agents SDK 运行时、`search`/`list`/`read`/`grep` 工具、materials 受控访问与长结果落盘，读取边界仍限制在 `materials/`。
 - `session_storage/`、`result_assembler/`、终稿导出与 GUI/CLI 入口继续沿用现有工程层。
 - `runtime_factory.py` 负责把应用层与 Agents SDK 运行时装配解耦，`app.py` 不再直接实例化具体运行时对象。
 
@@ -102,10 +102,11 @@ Agents SDK 输出模式：
 - 当前 Agents SDK 运行时会额外把运行时 session 持久化到 `.super_gongwen/agents_runtime/sessions.sqlite3`，但不会替代 `workspace.json`。
 - `OPENAI_BASE_URL` 仍可用于接入 OpenAI 兼容网关；当前所有网关路径都统一经由 Agents SDK 运行时。
 - 当兼容网关返回 `<think> + json`、代码块 JSON 或“只有分析没有 JSON”这类非标准输出时，运行时会先尝试解析，再自动触发一次 JSON 修复回合兜底。
+- 旧的 `read_materials -> tool_requests -> 应用层 execute_batch` 主路径已退场；如果当前需要补材料，模型会直接调用 SDK tools，再输出最终 JSON 动作。
 
 ## 材料目录
 
-`tool_runtime/content_access.py` 会优先从仓库根目录的 `materials/` 读取材料。
+`agents_runtime/materials_fs.py` 会优先从仓库根目录的 `materials/` 读取材料。
 
 支持的格式：
 
@@ -239,7 +240,7 @@ GUI 与 CLI 复用同一套配置、会话目录与核心执行链路：
 ## 设计说明
 
 - 当前仓库使用平铺目录结构，直接以 `main.py` 作为唯一 CLI 入口。
-- `content_access.py` 优先锚定仓库根目录 `materials/`，避免因为启动目录不同而读不到材料。
+- `agents_runtime/materials_fs.py` 优先锚定仓库根目录 `materials/`，避免因为启动目录不同而读不到材料。
 - PDF 读取优先使用 `pypdf`，提取失败时再回退到内置的轻量解析逻辑。
 - `.docx` 优先使用 `python-docx`，未安装时使用降级解析逻辑。
 - 如果未配置模型参数，`bootstrap` 可正常运行，但 `run_turn` 会返回未配置模型的错误，这是预期行为。
