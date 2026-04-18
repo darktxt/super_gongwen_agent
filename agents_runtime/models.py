@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 ActionTaken = Literal[
@@ -100,7 +100,43 @@ class AgentAskUserPayload(BaseModel):
 class AgentFinalizePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    final_text: str = ""
+    final_text: str = Field(
+        default="",
+        validation_alias=AliasChoices("final_text", "delivered_draft"),
+    )
+
+
+class AgentFinalizeSpecialistOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    final_text: str = Field(
+        default="",
+        validation_alias=AliasChoices("final_text", "delivered_draft"),
+    )
+    feedback: AgentSpecialistFeedbackPayload = Field(
+        default_factory=lambda: AgentSpecialistFeedbackPayload()
+    )
+
+
+class AgentSpecialistFeedbackPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: str = ""
+    recommended_action: str = ""
+    rationale: str = ""
+    assumptions: list[str] = Field(default_factory=list)
+    major_risks: list[str] = Field(default_factory=list)
+
+    def has_material_feedback(self) -> bool:
+        return any(
+            [
+                self.verdict.strip(),
+                self.recommended_action.strip(),
+                self.rationale.strip(),
+                self.assumptions,
+                self.major_risks,
+            ]
+        )
 
 
 class AgentOutlineSpecialistOutput(BaseModel):
@@ -108,6 +144,7 @@ class AgentOutlineSpecialistOutput(BaseModel):
 
     outline_text: str = ""
     outline_sections: list[AgentOutlineSectionPayload] = Field(default_factory=list)
+    feedback: AgentSpecialistFeedbackPayload = Field(default_factory=AgentSpecialistFeedbackPayload)
 
 
 class AgentDraftSpecialistOutput(BaseModel):
@@ -117,12 +154,14 @@ class AgentDraftSpecialistOutput(BaseModel):
     section_id: str = ""
     section_text: str = ""
     revised_text: str = ""
+    feedback: AgentSpecialistFeedbackPayload = Field(default_factory=AgentSpecialistFeedbackPayload)
 
 
 class AgentPolishSpecialistOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     polished_text: str = ""
+    feedback: AgentSpecialistFeedbackPayload = Field(default_factory=AgentSpecialistFeedbackPayload)
 
 
 class AgentSelfReviewPayload(BaseModel):
@@ -199,6 +238,11 @@ class AgentBrainStepOutput(BaseModel):
     action_payload: AgentActionPayloadEnvelope = Field(default_factory=AgentActionPayloadEnvelope)
     workspace_patch: AgentWorkspacePatchPayload = Field(default_factory=AgentWorkspacePatchPayload)
     self_review: AgentSelfReviewPayload = Field(default_factory=AgentSelfReviewPayload)
+    business_completion_declared: bool = False
+    completion_mode: str = ""
+    decision_rationale: str = ""
+    assumptions: list[str] = Field(default_factory=list)
+    major_risks: list[str] = Field(default_factory=list)
 
     def to_brain_step_dict(self) -> dict[str, Any]:
         action_payload = self.action_payload.model_dump(exclude_none=True, exclude_defaults=True)
@@ -206,6 +250,16 @@ class AgentBrainStepOutput(BaseModel):
             "action_taken": self.action_taken,
             "action_payload": action_payload,
         }
+        if self.business_completion_declared:
+            result["business_completion_declared"] = True
+        if self.completion_mode.strip():
+            result["completion_mode"] = self.completion_mode
+        if self.decision_rationale.strip():
+            result["decision_rationale"] = self.decision_rationale
+        if self.assumptions:
+            result["assumptions"] = list(self.assumptions)
+        if self.major_risks:
+            result["major_risks"] = list(self.major_risks)
         if self.workspace_patch.has_updates():
             result["workspace_patch"] = self.workspace_patch.model_dump(
                 exclude_defaults=True,

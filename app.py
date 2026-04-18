@@ -456,8 +456,10 @@ class SuperGongwenApp:
 
                 self.workflow_coordinator.transition_after_step(workspace, step)
 
-                if step.done:
+                if step.export_requested:
                     final_text = self._resolve_final_text_for_export(workspace, step)
+                    if not final_text:
+                        raise ValueError("finalize 动作缺少可导出的终稿文本。")
                     final_output_path = str(
                         save_final_output(
                             session_id,
@@ -670,12 +672,83 @@ class SuperGongwenApp:
     def _summarize_llm_response(self, response: Any) -> dict[str, Any]:
         raw_payload = dict(getattr(response, "raw_payload", {}) or {})
         content = str(getattr(response, "content", "") or "")
+        decision_trace = [
+            dict(item)
+            for item in list(raw_payload.get("decision_trace", []) or [])
+            if isinstance(item, dict)
+        ]
+        orchestration_summary = self._normalize_orchestration_summary(
+            raw_payload.get("orchestration_summary")
+        )
         return {
             "model": str(getattr(response, "model", "") or ""),
             "content_chars": len(content),
             "content_preview": self._preview_text(content, 500),
             "raw_payload_keys": sorted(str(key) for key in raw_payload.keys()),
+            "specialist_count": int(raw_payload.get("specialist_count", 0) or 0),
+            "decision_trace_count": len(decision_trace),
+            "decision_trace_summary": self._summarize_decision_trace(decision_trace),
+            "orchestration_summary": orchestration_summary,
+            "completion_mode": str(raw_payload.get("completion_mode", "") or "").strip(),
         }
+
+    def _normalize_orchestration_summary(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        summary = dict(value)
+        summary["used_specialist"] = bool(summary.get("used_specialist", False))
+        for key in ("initial_proposal", "final_decision"):
+            nested = summary.get(key)
+            summary[key] = dict(nested) if isinstance(nested, dict) else {}
+        feedback_items: list[dict[str, Any]] = []
+        for item in list(summary.get("specialist_feedback", []) or []):
+            if isinstance(item, dict):
+                feedback_items.append(dict(item))
+        summary["specialist_feedback"] = feedback_items[:4]
+        summary["assumptions"] = [
+            str(item).strip()
+            for item in list(summary.get("assumptions", []) or [])
+            if str(item).strip()
+        ][:5]
+        summary["major_risks"] = [
+            str(item).strip()
+            for item in list(summary.get("major_risks", []) or [])
+            if str(item).strip()
+        ][:5]
+        return summary
+
+    def _summarize_decision_trace(
+        self,
+        decision_trace: list[dict[str, Any]] | None,
+    ) -> list[str]:
+        if not isinstance(decision_trace, list):
+            return []
+        summary: list[str] = []
+        for item in list(decision_trace or []):
+            actor = str(item.get("actor", "") or "").strip() or "unknown"
+            kind = str(item.get("kind", "") or "").strip()
+            if kind == "coordinator":
+                stage = str(item.get("stage", "") or "").strip() or "decision"
+                action_taken = str(item.get("action_taken", "") or "").strip() or "unknown"
+                completion_mode = str(item.get("completion_mode", "") or "").strip()
+                line = f"{actor}:{stage}:{action_taken}"
+                if completion_mode:
+                    line += f":{completion_mode}"
+                summary.append(line)
+                continue
+            if kind == "specialist":
+                status = str(item.get("status", "") or "").strip() or "applied"
+                verdict = str(item.get("feedback_verdict", "") or "").strip()
+                recommended_action = str(item.get("recommended_action", "") or "").strip()
+                line = f"{actor}:{status}"
+                if verdict:
+                    line += f":{verdict}"
+                if recommended_action:
+                    line += f"->{recommended_action}"
+                summary.append(line)
+                continue
+            summary.append(actor)
+        return summary[:8]
 
     def _summarize_step(
         self,
@@ -688,7 +761,14 @@ class SuperGongwenApp:
         summary = {
             "action_taken": step.action_taken,
             "ask_user": step.ask_user,
-            "done": step.done,
+            "done": step.export_requested,
+            "business_completion_declared": step.business_completion_declared,
+            "completion_mode": step.completion_mode,
+            "decision_rationale": str(step.decision_rationale or "").strip(),
+            "assumptions": [str(item).strip() for item in list(step.assumptions or []) if str(item).strip()][:5],
+            "major_risks": [str(item).strip() for item in list(step.major_risks or []) if str(item).strip()][:5],
+            "assumption_count": len(step.assumptions),
+            "major_risk_count": len(step.major_risks),
             "tool_request_count": len(effective_tool_requests),
             "tool_names": [
                 self._tool_request_name(request)
@@ -763,8 +843,12 @@ class SuperGongwenApp:
             return "已向用户发起补充信息请求，共 " + str(len(question_pack)) + " 个问题。"
 
         if action == "finalize":
-            final_text = str(getattr(step.action_payload, "final_text", "") or "").strip()
-            return "已形成可交付终稿，长度约 " + str(self._count_text_units(final_text)) + " 字。"
+            final_text = self._final_text_from_step(step)
+            completion_mode = str(step.completion_mode or "").strip()
+            prefix = "已形成可交付终稿"
+            if completion_mode:
+                prefix = "已形成" + completion_mode
+            return prefix + "，长度约 " + str(self._count_text_units(final_text)) + " 字。"
 
         return ""
 
@@ -1035,6 +1119,10 @@ class SuperGongwenApp:
             round_no=round_no,
             action_taken=str(effective_action),
             result_status=str(effective_status),
+            business_completion_declared=bool(
+                effective_step_summary.get("business_completion_declared", False)
+            ),
+            completion_mode=str(effective_step_summary.get("completion_mode", "") or ""),
             context_block_titles=list(effective_compiled_summary.get("block_titles", []) or []),
             truncated_block_titles=list(
                 effective_compiled_summary.get("truncated_block_titles", []) or []
@@ -1051,6 +1139,12 @@ class SuperGongwenApp:
             open_gaps=list(effective_workspace_summary.get("open_gaps", []) or []),
             output_digest=str(effective_step_summary.get("output_digest", "") or ""),
             patch_digest=str(effective_step_summary.get("patch_digest", "") or ""),
+            decision_trace_summary=list(
+                effective_response_summary.get("decision_trace_summary", []) or []
+            )[:8],
+            orchestration_summary=self._normalize_orchestration_summary(
+                effective_response_summary.get("orchestration_summary")
+            ),
             llm_request_chars=int(effective_request_summary.get("user_prompt_chars", 0) or 0)
             + int(effective_request_summary.get("system_prompt_chars", 0) or 0)
             + int(effective_request_summary.get("context_chars", 0) or 0),
@@ -1066,6 +1160,15 @@ class SuperGongwenApp:
         history = workspace.session_meta.setdefault("action_history", [])
         history.append(step.action_taken)
         workspace.session_meta["last_action"] = step.action_taken
+        workspace.session_meta["last_business_completion_declared"] = bool(
+            step.business_completion_declared
+        )
+        workspace.session_meta["last_completion_mode"] = str(step.completion_mode or "").strip()
+        workspace.session_meta["last_decision_rationale"] = str(
+            step.decision_rationale or ""
+        ).strip()
+        workspace.session_meta["last_assumptions"] = list(step.assumptions or [])
+        workspace.session_meta["last_major_risks"] = list(step.major_risks or [])
 
     def _record_runtime_profile(self, workspace: WorkspaceState, response: Any) -> None:
         raw_payload = dict(getattr(response, "raw_payload", {}) or {})
@@ -1075,6 +1178,14 @@ class SuperGongwenApp:
         provider_profile = raw_payload.get("provider_profile")
         if isinstance(provider_profile, dict):
             workspace.session_meta["provider_profile"] = dict(provider_profile)
+        decision_trace_summary = self._summarize_decision_trace(raw_payload.get("decision_trace"))
+        if decision_trace_summary:
+            workspace.session_meta["last_decision_trace_summary"] = decision_trace_summary
+        orchestration_summary = self._normalize_orchestration_summary(
+            raw_payload.get("orchestration_summary")
+        )
+        if orchestration_summary:
+            workspace.session_meta["last_orchestration_summary"] = orchestration_summary
 
     def _record_quality_review_snapshot(
         self,
@@ -1089,6 +1200,19 @@ class SuperGongwenApp:
             "created_at": utc_now_iso(),
             "source": str(source or "").strip() or "brain_step",
             "action_taken": step.action_taken,
+            "business_completion_declared": bool(step.business_completion_declared),
+            "completion_mode": str(step.completion_mode or "").strip(),
+            "decision_rationale": str(step.decision_rationale or "").strip(),
+            "assumptions": [
+                str(item).strip()
+                for item in list(step.assumptions or [])
+                if str(item).strip()
+            ][:5],
+            "major_risks": [
+                str(item).strip()
+                for item in list(step.major_risks or [])
+                if str(item).strip()
+            ][:5],
             "dominant_issue": str(step.self_review.dominant_issue or "").strip(),
             "open_gaps": [
                 str(item).strip()
@@ -1117,10 +1241,12 @@ class SuperGongwenApp:
         workspace: WorkspaceState,
         step: BrainStepResult,
     ) -> str:
-        final_text = str(getattr(step.action_payload, "final_text", "") or "").strip()
-        if final_text:
-            return final_text
-        return str(workspace.draft_artifact.full_text or "").strip()
+        _ = workspace
+        return self._final_text_from_step(step)
+
+    def _final_text_from_step(self, step: BrainStepResult) -> str:
+        payload = getattr(step, "action_payload", None)
+        return str(getattr(payload, "final_text", "") or "").strip()
 
     def _apply_action_payload_fallbacks(
         self,
@@ -1203,7 +1329,7 @@ class SuperGongwenApp:
                 workspace.draft_artifact.status = "drafted"
 
         if step.action_taken == "finalize":
-            final_text = str(getattr(step.action_payload, "final_text", "") or "").strip()
+            final_text = self._final_text_from_step(step)
             if final_text:
                 workspace.draft_artifact.full_text = final_text
                 workspace.draft_artifact.section_map = {}

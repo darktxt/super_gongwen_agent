@@ -6,7 +6,7 @@
 - 用 LiteLLM 统一接入底层模型
 - 用 `workspace/` 保存写作状态与中间产物
 
-项目目标不是“给一个 prompt 直接吐整稿”，而是让补材、提纲、起草、修订、定稿都成为可追踪、可回放、可继续迭代的工程链路。
+项目目标不是“给一个 prompt 直接吐整稿”，而是让补材、提纲、起草、修订、追问、定稿都成为可追踪、可回放、可继续迭代的工程链路。
 
 ## 当前架构
 
@@ -94,12 +94,29 @@ python gui_main.py
 2. `ContextCompiler` 把工作区快照编译成主控 agent 上下文
 3. 主控 agent 通过受控工具补材料，并输出一个 `BrainStepResult`
 4. 应用层按 action 回写提纲、草稿、修订或追问
-5. 当主控输出 `finalize` 时直接导出终稿
+5. 当主控输出 `finalize` 且终稿文本可消费时直接导出终稿
 
 这里有两个明确原则：
 
 - 工作流判断尽量交给 agent，本地层只保留事实、记录、适配
 - 应用层不再使用独立质量门禁，也不再追加一轮应用层 LLM 评审
+- `evidence_board`、提纲、质量待办等中间态是辅助记忆，不是默认硬门槛
+
+## Agent 编排
+
+当前主链路不再把 specialist 当成被动字段填充器，而是采用更接近协作决策的模式：
+
+1. coordinator 先给出当前回合的初步方案
+2. specialist 生成中间文本，并可返回 `feedback`
+3. 如 specialist 认为当前方案不理想，可建议改动作、补充假设或提示主要风险
+4. coordinator 再作最终业务决策
+5. 应用层只做协议消费、状态写回和导出
+
+这意味着：
+
+- coordinator 负责“如何最好完成任务”
+- specialist 可以表达“支持 / 调整 / 改道 / 建议追问”
+- 程序默认不再因为中间字段未满而否决 agent 的业务判断
 
 ## 输出与产物
 
@@ -113,21 +130,33 @@ python gui_main.py
 - `outputs/final.md`
 - `outputs/final.docx`
 
-终稿是否成熟由主控 agent 结合上下文、自审与历史快照自行判断；应用层只负责执行导出，不再追加门禁裁决。
+终稿是否成熟由主控 agent 结合上下文、自审、历史快照、specialist 反馈与主要风险自行判断；应用层只负责执行导出，不再追加业务门禁裁决。
+
+当材料并不完备时，系统允许输出：
+
+- 正式终稿
+- 保守交付稿
+- 待补充稿
+- 需要用户继续确认的问题清单
+
+这些完成方式会通过 `completion_mode`、`decision_rationale`、`assumptions`、`major_risks` 等字段记录下来，而不是只靠“能不能 finalize”二元表示。
 
 ## Agents SDK 输出模式
 
 - 当前主控与 specialist 已统一使用文本 JSON 协议
 - 运行时会解析 `<think> + json`、代码块 JSON、半结构化文本，并在必要时触发一次 JSON 修复回合
 - 若 LiteLLM provider 把业务动作误发成 tool call，运行时会自动切到无工具恢复模式重跑
+- 调试信息会记录 `decision_trace`，用于说明 coordinator proposal、specialist feedback 与最终决策
 
 ## 已知边界
 
 - 当前工具面只聚焦本地 `materials/`，不以内置联网检索为主路径
 - `app.py` 仍然偏大，但主链路已经清晰收敛
-- 文稿质量更多依赖主控 agent 的语义判断与 `self_review` 沉淀，而不是本地启发式规则
+- 文稿质量更多依赖主控 agent 的语义判断、specialist 反馈、`self_review` 与风险披露，而不是本地启发式规则
+- 缺少 `evidence` 不会自动等同于拒绝推进；系统会优先尝试保守交付或显式追问
 
 ## 参考
 
 - 架构说明：[arch.md](./arch.md)
-- 变更规格：[openspec/changes/adopt-litellm-quality-first-runtime/](./openspec/changes/adopt-litellm-quality-first-runtime/)
+- 项目基线：[openspec/project.md](./openspec/project.md)
+- 当前变更规格：[openspec/changes/strengthen-agent-led-orchestration/](./openspec/changes/strengthen-agent-led-orchestration/)

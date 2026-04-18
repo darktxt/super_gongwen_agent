@@ -14,3 +14,4 @@ env/
 *.log
 openspec/
 tests
+AGENTS.md

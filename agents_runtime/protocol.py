@@ -46,6 +46,15 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _text_list(value: Any) -> list[str]:
+    items: list[str] = []
+    for raw in _as_list(value):
+        text = _text(raw)
+        if text:
+            items.append(text)
+    return items
+
+
 def _clean_dict(value: Mapping[str, Any]) -> dict[str, Any]:
     cleaned: dict[str, Any] = {}
     for key, raw in dict(value).items():
@@ -93,6 +102,11 @@ class ActionPayload(JsonDataclassMixin):
         cleaned = _clean_dict(current)
         if action_taken == "ask_user" and isinstance(cleaned.get("question_pack"), dict):
             cleaned["question_pack"] = [dict(cleaned["question_pack"])]
+        if action_taken == "finalize":
+            delivered_draft = _text(cleaned.get("delivered_draft"))
+            if delivered_draft and not _text(cleaned.get("final_text")):
+                cleaned["final_text"] = delivered_draft
+            cleaned.pop("delivered_draft", None)
         return cls(data=cleaned)
 
 
@@ -102,6 +116,11 @@ class BrainStepResult(JsonDataclassMixin):
     action_payload: ActionPayload = field(default_factory=ActionPayload)
     workspace_patch: WorkspacePatch = field(default_factory=WorkspacePatch)
     self_review: SelfReview = field(default_factory=SelfReview)
+    business_completion_declared: bool = False
+    completion_mode: str = ""
+    decision_rationale: str = ""
+    assumptions: list[str] = field(default_factory=list)
+    major_risks: list[str] = field(default_factory=list)
 
     @property
     def ask_user(self) -> bool:
@@ -109,7 +128,15 @@ class BrainStepResult(JsonDataclassMixin):
 
     @property
     def done(self) -> bool:
+        return self.export_requested
+
+    @property
+    def export_requested(self) -> bool:
         return self.action_taken == "finalize"
+
+    @property
+    def business_done(self) -> bool:
+        return bool(self.business_completion_declared or self.export_requested)
 
     @property
     def has_self_review(self) -> bool:
@@ -130,6 +157,16 @@ class BrainStepResult(JsonDataclassMixin):
             "action_taken": self.action_taken,
             "action_payload": {self.action_taken: self.action_payload.to_dict()},
         }
+        if self.business_completion_declared:
+            payload["business_completion_declared"] = True
+        if _text(self.completion_mode):
+            payload["completion_mode"] = self.completion_mode
+        if _text(self.decision_rationale):
+            payload["decision_rationale"] = self.decision_rationale
+        if self.assumptions:
+            payload["assumptions"] = list(self.assumptions)
+        if self.major_risks:
+            payload["major_risks"] = list(self.major_risks)
         if any(self.workspace_patch.to_dict().values()):
             payload["workspace_patch"] = self.workspace_patch.to_dict()
         if self.has_self_review and self.action_taken not in CONTROL_ONLY_ACTIONS:
@@ -149,8 +186,18 @@ class BrainStepResult(JsonDataclassMixin):
         return cls(
             action_taken=action_taken,
             action_payload=ActionPayload.from_action(action_taken, normalized.get("action_payload")),
-            workspace_patch=WorkspacePatch.from_dict(normalized.get("workspace_patch", {})),
-            self_review=SelfReview.from_dict(normalized.get("self_review", {})),
+            workspace_patch=WorkspacePatch.from_dict(_as_dict(normalized.get("workspace_patch"))),
+            self_review=SelfReview.from_dict(_as_dict(normalized.get("self_review"))),
+            business_completion_declared=bool(
+                normalized.get(
+                    "business_completion_declared",
+                    normalized.get("completion_declared", action_taken == "finalize"),
+                )
+            ),
+            completion_mode=_text(normalized.get("completion_mode")),
+            decision_rationale=_text(normalized.get("decision_rationale")),
+            assumptions=_text_list(normalized.get("assumptions")),
+            major_risks=_text_list(normalized.get("major_risks")),
         )
 
 

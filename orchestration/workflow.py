@@ -67,7 +67,7 @@ class WorkflowCoordinator:
             )
             return
 
-        if step.done:
+        if step.export_requested:
             self._set_phase(
                 workspace,
                 "completed",

@@ -210,10 +210,13 @@ class ResultAssembler:
             if polished_text:
                 return "润色后正文", polished_text
         if action_taken == "finalize":
-            final_text = str(getattr(payload, "final_text", "") or "").strip()
+            final_text = self._final_text_from_payload(payload)
             if final_text:
                 return "终稿正文", final_text
         return "", ""
+
+    def _final_text_from_payload(self, payload: object | None) -> str:
+        return str(getattr(payload, "final_text", "") or "").strip()
 
     def _build_material_readout(
         self,

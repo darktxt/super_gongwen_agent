@@ -331,6 +331,8 @@ class DebugRoundSummary(JsonDataclassMixin):
     round_no: int = 0
     action_taken: str = ""
     result_status: str = ""
+    business_completion_declared: bool = False
+    completion_mode: str = ""
     context_block_titles: list[str] = field(default_factory=list)
     truncated_block_titles: list[str] = field(default_factory=list)
     tool_names: list[str] = field(default_factory=list)
@@ -343,6 +345,8 @@ class DebugRoundSummary(JsonDataclassMixin):
     open_gaps: list[str] = field(default_factory=list)
     output_digest: str = ""
     patch_digest: str = ""
+    decision_trace_summary: list[str] = field(default_factory=list)
+    orchestration_summary: dict[str, Any] = field(default_factory=dict)
     llm_request_chars: int = 0
     llm_response_chars: int = 0
     llm_response_preview: str = ""

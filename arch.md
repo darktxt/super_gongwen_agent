@@ -24,13 +24,30 @@
 - 记录运行状态
 - 执行动作结果
 
-不再在本地层做“证据强/弱”“建议下一步 revise_draft”“满足 4 条证据即可定稿”这类伪智能判断。当前链路唯一的业务决策源是主控 agent。
+不再在本地层做“证据强/弱”“建议下一步 revise_draft”“满足 4 条证据即可定稿”这类伪智能判断。当前链路唯一的最终业务决策源是 coordinator。
 
-### 2.2 工作区是事实源
+### 2.2 允许保守交付，不把 evidence 当硬门槛
+
+`evidence_board`、提纲、质量待办、自审快照都很重要，但它们是辅助记忆，不是默认硬门槛。
+
+当材料不完备时，系统优先采用三种策略之一：
+
+- 保守交付
+- 继续修订
+- ask_user 追问关键缺口
+
+这里的关键不是“字段有没有齐”，而是“在当前边界下怎样最负责任地完成任务”。因此运行时会显式记录：
+
+- `completion_mode`
+- `decision_rationale`
+- `assumptions`
+- `major_risks`
+
+### 2.3 工作区是事实源
 
 `workspace.json` 不是调试副产物，而是整条写作链路的事实源。提纲、草稿、证据、修订历史、质量快照都沉淀在这里，方便多轮续写与复盘。
 
-### 2.3 工具必须有边界
+### 2.4 工具必须有边界
 
 主控 agent 默认只接触受控材料工具：`search`、`list`、`read`、`grep`。工具访问被限制在 `materials/` 目录内，避免把整个仓库暴露给模型。
 
@@ -97,6 +114,16 @@ materials/              本地材料目录
 - `ask_user`
 - `finalize`
 
+除了 action 本身，当前协议还支持表达：
+
+- `business_completion_declared`
+- `completion_mode`
+- `decision_rationale`
+- `assumptions`
+- `major_risks`
+
+这样“任务完成”不再只靠 `finalize` 一个动作名来表达，而是能同时说明为什么这样决定、有哪些边界和风险。
+
 ### 4.4 Agents SDK 运行时层
 
 [agents_runtime/brain_runner.py](./agents_runtime/brain_runner.py) 负责：
@@ -108,8 +135,15 @@ materials/              本地材料目录
 - 在需要时触发 JSON 修复回合
 - 在 provider 把业务动作误发成 tool call 时进入无工具恢复模式
 - 运行 `outline`、`draft`、`polish` specialist
+- 在需要时形成 `Coordinator Proposal -> Specialist Feedback -> Coordinator Final Decision`
 
-这里的 specialist 只产出中间结果，不直接替代主控做最终业务动作。
+这里的 specialist 不再只是字段填充器，而是：
+
+- 生成中间文本结果
+- 返回 `feedback`
+- 对当前方案提出支持、调整、改道或追问建议
+
+但最终业务裁决仍由 coordinator 给出。
 
 ### 4.5 工作区层
 
@@ -137,6 +171,15 @@ materials/              本地材料目录
 - `tool_results/` 工具结果
 - `outputs/final.md` 与 `outputs/final.docx`
 
+当前调试信息除了原始请求/响应外，还会沉淀：
+
+- `decision_trace`
+- `specialist_trace`
+- `completion_mode`
+- 假设与主要风险摘要
+
+目标不是堆更多字段，而是让人能读懂“这一轮为什么这么决定”。
+
 ## 5. 端到端链路
 
 一次 `run_turn()` 的主链路如下：
@@ -146,9 +189,10 @@ materials/              本地材料目录
 3. 生成 `WorkspaceSnapshot`
 4. `ContextCompiler` 编译上下文
 5. 主控 agent 运行，并在同一轮内按需调用 `search/list/read/grep`
-6. 解析输出为 `BrainStepResult`
-7. 把 action 结果回写工作区
-8. 若动作为 `finalize`，直接导出终稿；否则继续下一轮
+6. 必要时调用 specialist 形成中间产物和反馈
+7. coordinator 形成最终 `BrainStepResult`
+8. 把 action 结果回写工作区
+9. 若动作为 `finalize` 且终稿文本可消费，直接导出终稿；否则继续下一轮
 
 简图如下：
 
@@ -164,6 +208,7 @@ run_turn()
    |      |
    |      +--> function_tool(search/list/read/grep)
    |      +--> specialists
+   |      +--> decision_trace
    |
    +--> SessionStorage / Observability
    |
@@ -175,15 +220,17 @@ Updated Workspace / Final Output
 
 当前质量控制不再依赖独立静态门禁模块，也不再采用“主控判断后，应用层再跑一轮评审”的双层结构。现在的做法是：
 
-- 主控 agent 结合上下文、历史稿件、自审与质量快照决定是否进入 `finalize`
+- coordinator 结合上下文、历史稿件、自审、quality signals 和 specialist 反馈决定是否进入 `finalize`
 - `self_review`、`quality_review_snapshots`、`finalization_blockers` 继续作为工作区里的历史事实沉淀
-- 应用层只执行动作结果，不再额外改判
+- 应用层只执行技术消费，不再额外改判业务动作
 
 这意味着：
 
 - 不再靠本地 `if/else` 规则推断下一步动作
 - 不再在主控输出后追加一轮应用层质量裁决
+- 缺少 evidence 不会自动等同于拒绝推进
 - 质量相关信息仍会沉淀进工作区，供后续回合继续处理
+- 系统在必要时会以保守措辞、假设说明和风险披露完成交付
 
 ## 7. 模型与 provider
 
@@ -209,7 +256,7 @@ Updated Workspace / Final Output
 
 - `app.py` 仍承担较多编排职责，后续可以继续拆分
 - 当前工具层聚焦本地材料，不以内置联网检索为主路径
-- 文稿质量主要依赖主控 agent 的语义判断，不是形式化验证器
+- 文稿质量主要依赖主控 agent 的语义判断与 specialist 协作，不是形式化验证器
 - CLI 与 GUI 已可用，但仍偏工程工具而非完整产品
 
 ## 10. 总结

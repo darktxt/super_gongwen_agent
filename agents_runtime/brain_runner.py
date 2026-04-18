@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any, Callable
 import json
 import re
+import sys
+import time
 
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 
@@ -32,6 +34,7 @@ from agents_runtime.protocol import (
 from .models import (
     AgentBrainStepOutput,
     AgentDraftSpecialistOutput,
+    AgentFinalizeSpecialistOutput,
     AgentOutlineSpecialistOutput,
     AgentPolishSpecialistOutput,
 )
@@ -73,6 +76,8 @@ class AgentsSdkBrainRunner:
         self._session_storage_error = ""
         self._fallback_parser = OutputParser()
         self._max_repair_attempts = 1
+        self._max_specialist_feedback_rounds = 1
+        self._runner_max_turns = sys.maxsize
         self.provider_profile = self._build_provider_profile()
         self._model = LitellmModel(
             model=self.model_name,
@@ -128,6 +133,10 @@ class AgentsSdkBrainRunner:
                 session_id=session_id,
             )
             step = BrainStepResult.from_dict(payload)
+            orchestration_summary = self._build_orchestration_summary(
+                step=step,
+                decision_trace=specialist_trace,
+            )
             response = LLMResponse(
                 content=json.dumps(payload, ensure_ascii=False, indent=2),
                 model=self.model_name,
@@ -146,8 +155,13 @@ class AgentsSdkBrainRunner:
                     "session_id": session_id or "",
                     "tool_request_count": len(runtime_context.tool_requests),
                     "tool_result_count": len(runtime_context.tool_results),
-                    "specialist_count": len(specialist_trace),
-                    "specialist_trace": specialist_trace,
+                    "specialist_count": self._count_specialist_trace(specialist_trace),
+                    "specialist_trace": self._specialist_trace_only(specialist_trace),
+                    "decision_trace": specialist_trace,
+                    "orchestration_summary": orchestration_summary,
+                    "business_completion_declared": step.business_completion_declared,
+                    "completion_mode": step.completion_mode,
+                    "decision_rationale": step.decision_rationale,
                     "session_storage_available": self._session_storage_available,
                     "session_storage_error": self._session_storage_error,
                 },
@@ -167,6 +181,10 @@ class AgentsSdkBrainRunner:
             )
             if fallback_step is not None:
                 payload = fallback_step.to_dict()
+                orchestration_summary = self._build_orchestration_summary(
+                    step=fallback_step,
+                    decision_trace=specialist_trace,
+                )
                 response = LLMResponse(
                     content=json.dumps(payload, ensure_ascii=False, indent=2),
                     model=self.model_name,
@@ -183,8 +201,13 @@ class AgentsSdkBrainRunner:
                         "error_preview": str(exc)[:1200],
                         "tool_request_count": len(runtime_context.tool_requests),
                         "tool_result_count": len(runtime_context.tool_results),
-                        "specialist_count": len(specialist_trace),
-                        "specialist_trace": specialist_trace,
+                        "specialist_count": self._count_specialist_trace(specialist_trace),
+                        "specialist_trace": self._specialist_trace_only(specialist_trace),
+                        "decision_trace": specialist_trace,
+                        "orchestration_summary": orchestration_summary,
+                        "business_completion_declared": fallback_step.business_completion_declared,
+                        "completion_mode": fallback_step.completion_mode,
+                        "decision_rationale": fallback_step.decision_rationale,
                         "session_storage_available": self._session_storage_available,
                         "session_storage_error": self._session_storage_error,
                     },
@@ -212,8 +235,9 @@ class AgentsSdkBrainRunner:
                         "error": str(exc),
                         "tool_request_count": len(runtime_context.tool_requests),
                         "tool_result_count": len(runtime_context.tool_results),
-                        "specialist_count": len(specialist_trace),
-                        "specialist_trace": specialist_trace,
+                        "specialist_count": self._count_specialist_trace(specialist_trace),
+                        "specialist_trace": self._specialist_trace_only(specialist_trace),
+                        "decision_trace": specialist_trace,
                         "session_storage_available": self._session_storage_available,
                         "session_storage_error": self._session_storage_error,
                     },
@@ -391,16 +415,14 @@ class AgentsSdkBrainRunner:
         request: LLMRequest,
         session_id: str | None,
         runtime_context: AgentsToolRuntimeContext | None = None,
-        max_turns: int | None = None,
         run_config: RunConfig | None = None,
     ) -> Any:
         run_kwargs: dict[str, Any] = {
             "context": runtime_context,
             "session": self._build_session(session_id),
             "run_config": run_config or self._build_run_config(session_id),
+            "max_turns": self._runner_max_turns,
         }
-        if max_turns is not None:
-            run_kwargs["max_turns"] = max_turns
         return Runner.run_sync(
             agent,
             self._render_user_content(request),
@@ -468,6 +490,78 @@ class AgentsSdkBrainRunner:
             trace_metadata=trace_metadata,
         )
 
+    def _specialist_trace_only(self, decision_trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            dict(item)
+            for item in list(decision_trace or [])
+            if str(item.get("kind", "") or "").strip() == "specialist"
+        ]
+
+    def _count_specialist_trace(self, decision_trace: list[dict[str, Any]]) -> int:
+        return len(self._specialist_trace_only(decision_trace))
+
+    def _build_orchestration_summary(
+        self,
+        *,
+        step: BrainStepResult,
+        decision_trace: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        initial_proposal: dict[str, Any] = {}
+        final_decision: dict[str, Any] = {}
+        specialist_feedback: list[dict[str, Any]] = []
+        for item in list(decision_trace or []):
+            kind = str(item.get("kind", "") or "").strip()
+            if kind == "coordinator":
+                stage = str(item.get("stage", "") or "").strip()
+                compact = {
+                    "stage": stage,
+                    "action_taken": str(item.get("action_taken", "") or "").strip(),
+                    "completion_mode": str(item.get("completion_mode", "") or "").strip(),
+                    "business_completion_declared": bool(
+                        item.get("business_completion_declared", False)
+                    ),
+                    "decision_rationale_preview": str(
+                        item.get("decision_rationale_preview", "") or ""
+                    ).strip(),
+                }
+                if stage == "initial_proposal":
+                    initial_proposal = compact
+                if stage == "final_decision":
+                    final_decision = compact
+                continue
+            if kind == "specialist":
+                specialist_feedback.append(
+                    {
+                        "actor": str(item.get("actor", "") or "").strip(),
+                        "status": str(item.get("status", "") or "").strip(),
+                        "feedback_verdict": str(item.get("feedback_verdict", "") or "").strip(),
+                        "recommended_action": str(
+                            item.get("recommended_action", "") or ""
+                        ).strip(),
+                        "requires_final_decision": bool(
+                            item.get("requires_final_decision", False)
+                        ),
+                    }
+                )
+        if not final_decision:
+            final_decision = {
+                "stage": "final_decision",
+                "action_taken": step.action_taken,
+                "completion_mode": step.completion_mode,
+                "business_completion_declared": step.business_completion_declared,
+                "decision_rationale_preview": step.decision_rationale[:400],
+            }
+        return {
+            "used_specialist": bool(specialist_feedback),
+            "initial_proposal": initial_proposal,
+            "specialist_feedback": specialist_feedback,
+            "final_decision": final_decision,
+            "business_completion_declared": step.business_completion_declared,
+            "completion_mode": step.completion_mode,
+            "assumptions": list(step.assumptions[:5]),
+            "major_risks": list(step.major_risks[:5]),
+        }
+
     def _apply_specialist_pipeline(
         self,
         payload: dict[str, Any],
@@ -503,6 +597,15 @@ class AgentsSdkBrainRunner:
                 specialist_name="polish_specialist",
                 producer=self._run_polish_specialist,
             )
+        if action_taken == "finalize":
+            return self._finalize_step_with_specialist(
+                payload,
+                request=request,
+                session_id=session_id,
+                action_taken=action_taken,
+                specialist_name="draft_specialist",
+                producer=self._run_finalize_specialist,
+            )
 
         fallback_step = self._try_build_step_from_payload(payload)
         return (fallback_step.to_dict() if fallback_step is not None else payload), []
@@ -517,39 +620,275 @@ class AgentsSdkBrainRunner:
         specialist_name: str,
         producer: Callable[..., dict[str, Any]],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        decision_trace: list[dict[str, Any]] = [
+            self._build_coordinator_trace_entry(
+                payload,
+                stage="initial_proposal",
+                specialist_name=specialist_name,
+            )
+        ]
         try:
+            started_at = time.perf_counter()
             specialist_payload = producer(
                 request=request,
                 payload=payload,
                 session_id=session_id,
                 action_taken=action_taken,
             )
+            specialist_duration_ms = int((time.perf_counter() - started_at) * 1000)
+            feedback = self._extract_specialist_feedback(specialist_payload)
             merged_payload = self._merge_specialist_action_payload(
                 payload,
                 action_taken=action_taken,
                 specialist_payload=specialist_payload,
             )
+            merged_payload = self._merge_feedback_into_payload(
+                merged_payload,
+                feedback=feedback,
+            )
+            specialist_trace = self._build_specialist_trace_entry(
+                specialist_name=specialist_name,
+                action_taken=action_taken,
+                specialist_payload=specialist_payload,
+                feedback=feedback,
+                duration_ms=specialist_duration_ms,
+                requires_final_decision=self._feedback_requires_final_decision(
+                    action_taken=action_taken,
+                    feedback=feedback,
+                ),
+            )
+            decision_trace.append(specialist_trace)
+            if self._feedback_requires_final_decision(
+                action_taken=action_taken,
+                feedback=feedback,
+            ):
+                final_payload = self._run_final_coordinator_decision(
+                    base_request=request,
+                    initial_payload=payload,
+                    merged_payload=merged_payload,
+                    specialist_name=specialist_name,
+                    specialist_payload=specialist_payload,
+                    feedback=feedback,
+                    session_id=session_id,
+                )
+                final_step = BrainStepResult.from_dict(final_payload)
+                decision_trace.append(
+                    self._build_coordinator_trace_entry(
+                        final_payload,
+                        stage="final_decision",
+                        specialist_name=specialist_name,
+                    )
+                )
+                return final_step.to_dict(), decision_trace
             step = BrainStepResult.from_dict(merged_payload)
-            return step.to_dict(), [
-                {
-                    "specialist": specialist_name,
-                    "status": "applied",
-                    "action_taken": action_taken,
-                    "output_fields": sorted(specialist_payload.keys()),
-                }
-            ]
+            decision_trace.append(
+                self._build_coordinator_trace_entry(
+                    step.to_dict(),
+                    stage="final_decision",
+                    specialist_name=specialist_name,
+                )
+            )
+            return step.to_dict(), decision_trace
         except Exception as exc:
             fallback_step = self._try_build_step_from_payload(payload)
             if fallback_step is None:
                 raise
-            return fallback_step.to_dict(), [
+            decision_trace.append(
                 {
-                    "specialist": specialist_name,
+                    "kind": "specialist",
+                    "actor": specialist_name,
                     "status": "fallback_to_coordinator",
                     "action_taken": action_taken,
                     "error_preview": str(exc)[:800],
                 }
+            )
+            return fallback_step.to_dict(), decision_trace
+
+    def _build_coordinator_trace_entry(
+        self,
+        payload: dict[str, Any],
+        *,
+        stage: str,
+        specialist_name: str,
+    ) -> dict[str, Any]:
+        step = BrainStepResult.from_dict(payload)
+        return {
+            "kind": "coordinator",
+            "actor": "coordinator",
+            "stage": stage,
+            "action_taken": step.action_taken,
+            "business_completion_declared": step.business_completion_declared,
+            "completion_mode": step.completion_mode,
+            "decision_rationale_preview": step.decision_rationale[:400],
+            "assumption_count": len(step.assumptions),
+            "major_risk_count": len(step.major_risks),
+            "related_specialist": specialist_name,
+        }
+
+    def _extract_specialist_feedback(self, specialist_payload: dict[str, Any]) -> dict[str, Any]:
+        raw_feedback = specialist_payload.get("feedback")
+        if not isinstance(raw_feedback, dict):
+            return {}
+        recommended_action = str(raw_feedback.get("recommended_action", "") or "").strip()
+        return {
+            "verdict": str(raw_feedback.get("verdict", "") or "").strip(),
+            "recommended_action": recommended_action if recommended_action in VALID_ACTIONS else "",
+            "rationale": str(raw_feedback.get("rationale", "") or "").strip(),
+            "assumptions": [
+                str(item).strip()
+                for item in list(raw_feedback.get("assumptions", []) or [])
+                if str(item).strip()
+            ][:6],
+            "major_risks": [
+                str(item).strip()
+                for item in list(raw_feedback.get("major_risks", []) or [])
+                if str(item).strip()
+            ][:6],
+        }
+
+    def _feedback_requires_final_decision(
+        self,
+        *,
+        action_taken: str,
+        feedback: dict[str, Any],
+    ) -> bool:
+        verdict = str(feedback.get("verdict", "") or "").strip().lower()
+        recommended_action = str(feedback.get("recommended_action", "") or "").strip()
+        if recommended_action and recommended_action != action_taken:
+            return True
+        return verdict in {"adjust", "redirect", "block", "alternate"}
+
+    def _build_specialist_trace_entry(
+        self,
+        *,
+        specialist_name: str,
+        action_taken: str,
+        specialist_payload: dict[str, Any],
+        feedback: dict[str, Any],
+        duration_ms: int,
+        requires_final_decision: bool,
+    ) -> dict[str, Any]:
+        output_fields = sorted(
+            key for key in specialist_payload.keys() if str(key).strip() and key != "feedback"
+        )
+        return {
+            "kind": "specialist",
+            "actor": specialist_name,
+            "status": "applied",
+            "action_taken": action_taken,
+            "output_fields": output_fields,
+            "duration_ms": duration_ms,
+            "feedback_verdict": str(feedback.get("verdict", "") or "").strip(),
+            "recommended_action": str(feedback.get("recommended_action", "") or "").strip(),
+            "feedback_rationale_preview": str(feedback.get("rationale", "") or "").strip()[:400],
+            "assumption_count": len(list(feedback.get("assumptions", []) or [])),
+            "major_risk_count": len(list(feedback.get("major_risks", []) or [])),
+            "requires_final_decision": bool(requires_final_decision),
+        }
+
+    def _merge_feedback_into_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        feedback: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not feedback:
+            return dict(payload)
+        merged = dict(payload)
+        if not str(merged.get("decision_rationale", "") or "").strip() and str(
+            feedback.get("rationale", "") or ""
+        ).strip():
+            merged["decision_rationale"] = str(feedback.get("rationale", "") or "").strip()
+        if not list(merged.get("assumptions", []) or []):
+            merged["assumptions"] = list(feedback.get("assumptions", []) or [])
+        if not list(merged.get("major_risks", []) or []):
+            merged["major_risks"] = list(feedback.get("major_risks", []) or [])
+        return merged
+
+    def _run_final_coordinator_decision(
+        self,
+        *,
+        base_request: LLMRequest,
+        initial_payload: dict[str, Any],
+        merged_payload: dict[str, Any],
+        specialist_name: str,
+        specialist_payload: dict[str, Any],
+        feedback: dict[str, Any],
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        request = self._build_final_decision_request(
+            base_request=base_request,
+            initial_payload=initial_payload,
+            merged_payload=merged_payload,
+            specialist_name=specialist_name,
+            specialist_payload=specialist_payload,
+            feedback=feedback,
+        )
+        result = self._run_agent(
+            agent=self._build_coordinator_agent(
+                instructions=base_request.system_prompt,
+                allow_tools=False,
+                recovery_note=(
+                    "你正在根据 specialist 反馈做最终业务决策。"
+                    "本轮不得再调用工具；你可以维持原动作，也可以改成更合适的动作，但必须给出合法 BrainStepResult JSON。"
+                ),
+            ),
+            request=request,
+            session_id=None if session_id is None else f"{session_id}__final_decision",
+            run_config=self._build_specialist_run_config("coordinator_final_decision", session_id),
+        )
+        return self._coerce_run_result_payload(
+            result,
+            request=request,
+            session_id=None if session_id is None else f"{session_id}__final_decision",
+        )
+
+    def _build_final_decision_request(
+        self,
+        *,
+        base_request: LLMRequest,
+        initial_payload: dict[str, Any],
+        merged_payload: dict[str, Any],
+        specialist_name: str,
+        specialist_payload: dict[str, Any],
+        feedback: dict[str, Any],
+    ) -> LLMRequest:
+        return LLMRequest(
+            model=self.model_name,
+            system_prompt=base_request.system_prompt,
+            user_prompt=(
+                "你已经收到了 specialist 的反馈。现在请作为 coordinator 做最终业务决策。"
+                "如果 specialist 的反馈有价值，可以调整 action；如果原方案仍更合适，也可以维持原 action。"
+                "你的输出必须是一个合法 BrainStepResult JSON。"
+            ),
+            context_blocks=[
+                {
+                    "title": "Coordinator Proposal",
+                    "content": json.dumps(initial_payload, ensure_ascii=False, indent=2),
+                },
+                {
+                    "title": "Specialist Feedback",
+                    "content": json.dumps(
+                        {
+                            "specialist": specialist_name,
+                            "feedback": feedback,
+                            "specialist_output": specialist_payload,
+                            "candidate_payload_after_merge": merged_payload,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                },
             ]
+            + self._select_specialist_context_blocks(base_request.context_blocks),
+            metadata={
+                **dict(base_request.metadata or {}),
+                "runtime_backend": "agents_sdk",
+                "runtime_workflow": self.runtime_workflow,
+                "coordinator_stage": "final_decision",
+                "specialist_name": specialist_name,
+            },
+        )
 
     def _try_build_step_from_payload(self, payload: dict[str, Any]) -> BrainStepResult | None:
         try:
@@ -632,6 +971,19 @@ class AgentsSdkBrainRunner:
             return {
                 "polished_text": self._pick_first_text(specialist_payload, "polished_text")
                 or self._pick_first_text(current_payload, "polished_text"),
+            }
+        if action_taken == "finalize":
+            return {
+                "final_text": self._pick_first_text(
+                    specialist_payload,
+                    "final_text",
+                    "delivered_draft",
+                )
+                or self._pick_first_text(
+                    current_payload,
+                    "final_text",
+                    "delivered_draft",
+                ),
             }
 
         return dict(current_payload)
@@ -749,6 +1101,34 @@ class AgentsSdkBrainRunner:
             session_id=None if session_id is None else f"{session_id}__polish",
         )
 
+    def _run_finalize_specialist(
+        self,
+        *,
+        request: LLMRequest,
+        payload: dict[str, Any],
+        session_id: str | None,
+        action_taken: str,
+    ) -> dict[str, Any]:
+        finalize_request = self._build_finalize_specialist_request(
+            base_request=request,
+            payload=payload,
+        )
+        result = self._run_agent(
+            agent=self._build_specialist_agent(
+                name="EditorialDraftSpecialist",
+                instructions=self._build_finalize_specialist_instructions(),
+            ),
+            request=finalize_request,
+            session_id=None if session_id is None else f"{session_id}__finalize",
+            run_config=self._build_specialist_run_config("finalize_specialist", session_id),
+        )
+        return self._parse_typed_json_output(
+            result,
+            AgentFinalizeSpecialistOutput,
+            request=finalize_request,
+            session_id=None if session_id is None else f"{session_id}__finalize",
+        )
+
     def _build_specialist_request(
         self,
         *,
@@ -758,7 +1138,7 @@ class AgentsSdkBrainRunner:
     ) -> LLMRequest:
         context_blocks = [
             {
-                "title": "Locked Coordinator Decision",
+                "title": "Coordinator Proposal",
                 "content": json.dumps(payload, ensure_ascii=False, indent=2),
             }
         ] + self._select_specialist_context_blocks(base_request.context_blocks)
@@ -773,6 +1153,47 @@ class AgentsSdkBrainRunner:
                 "runtime_backend": "agents_sdk",
                 "runtime_workflow": self.runtime_workflow,
             },
+        )
+
+    def _build_finalize_specialist_request(
+        self,
+        *,
+        base_request: LLMRequest,
+        payload: dict[str, Any],
+    ) -> LLMRequest:
+        context_blocks = [
+            {
+                "title": "Coordinator Proposal",
+                "content": json.dumps(payload, ensure_ascii=False, indent=2),
+            }
+        ] + self._select_specialist_context_blocks(base_request.context_blocks)
+        return LLMRequest(
+            model=self.model_name,
+            system_prompt="finalize_specialist",
+            user_prompt=(
+                "请先判断 coordinator 当前关于 finalize 的方案是否合理，再输出可直接交付的 final_text。"
+                "如果你认为应先改为 revise_draft、polish_language 或 ask_user，请在 feedback 中明确指出原因。"
+                "缺少 evidence 不是硬门槛；可以按现有材料给出保守交付稿，但必须保持正式公文语体，并在 feedback 中披露 assumptions 和 major_risks。"
+                "不要输出 BrainStepResult。"
+                '最终只输出一个 JSON object，例如 {"final_text":"...","feedback":{"verdict":"support","rationale":"..."}}。'
+            ),
+            context_blocks=context_blocks,
+            metadata={
+                **dict(base_request.metadata or {}),
+                "specialist_action": "finalize",
+                "runtime_backend": "agents_sdk",
+                "runtime_workflow": self.runtime_workflow,
+            },
+        )
+
+    def _build_finalize_specialist_instructions(self) -> str:
+        return (
+            "你是 super-gongwen-agent 的 finalize specialist，由 draft_specialist 负责终稿级协作。"
+            "你的职责是在不虚构事实的前提下，对 coordinator 拟定的 finalize 方案做终稿级通读、定稿和风险反馈。"
+            "缺少 evidence 不等于必须拒绝交付；只要正文在现有边界内已经可用，你应优先给出保守但可交付的 final_text。"
+            "如果你判断当前仍应改为 revise_draft、polish_language 或 ask_user，请在 feedback 中明确建议动作、理由、assumptions 和 major_risks。"
+            "你不是最终业务决策者，不能直接输出 BrainStepResult。"
+            + self._build_specialist_guardrails()
         )
 
     def _select_specialist_context_blocks(
@@ -804,79 +1225,79 @@ class AgentsSdkBrainRunner:
     def _build_specialist_user_prompt(self, action_taken: str) -> str:
         if action_taken == "build_outline":
             return (
-                "主控已锁定当前动作为 build_outline。你只负责生成提纲中间产物，"
-                "输出 outline_text 和/或 outline_sections。优先遵循 Writing Brief 与 Locked Coordinator Decision，"
-                "把提纲写成后续可直接起草的骨架：层次清楚、问题导向明确、措施抓手具体、责任链条可展开。"
-                "必须吸收 directive、evidence 和 quality backlog。"
-                "不要改动作，不要 ask_user，不要 finalize，不要输出 BrainStepResult。"
-                '最终只输出一个 JSON object，例如 {"outline_text":"...","outline_sections":[...]}。'
+                "请先判断 coordinator 当前关于 build_outline 的方案是否合理，再生成提纲中间产物。"
+                "你可以支持原方案，也可以指出应先补结构、改动作或向用户追问的理由。"
+                "输出 outline_text 和/或 outline_sections；同时可以在 feedback 中给出 verdict、recommended_action、rationale、assumptions、major_risks。"
+                "不要直接 finalize，也不要输出 BrainStepResult。"
+                '最终只输出一个 JSON object，例如 {"outline_text":"...","outline_sections":[...],"feedback":{"verdict":"support","rationale":"..."}}。'
             )
         if action_taken == "write_draft":
             return (
-                "主控已锁定当前动作为 write_draft。你只负责生成可直接写回正文的 draft_text。"
-                "优先遵循 Writing Brief 与 Locked Coordinator Decision，把结构、事实依据、问题回应、措施安排写实写清。"
-                "必须落实写作目标、保留规则、已确认结构与证据，不要改动作，不要输出 BrainStepResult。"
-                '最终只输出一个 JSON object，例如 {"draft_text":"..."}。'
+                "请先判断 coordinator 当前关于 write_draft 的方案是否合理，再生成可直接写回正文的 draft_text。"
+                "如果你认为应该先补结构、改为 revise_draft、改为 ask_user 或采用更保守的完成方式，可以在 feedback 中明确提出。"
+                "不要直接 finalize，也不要输出 BrainStepResult。"
+                '最终只输出一个 JSON object，例如 {"draft_text":"...","feedback":{"verdict":"adjust","recommended_action":"build_outline","rationale":"..."}}。'
             )
         if action_taken == "write_section":
             return (
-                "主控已锁定当前动作为 write_section。你只负责补写目标 section_id 对应的 section_text。"
-                "优先沿用主控已给出的 section_id，并遵循 Writing Brief 与 Locked Coordinator Decision，"
-                "把该节写成能直接并入整稿的正式公文段落，不要改动作，不要输出 BrainStepResult。"
-                '最终只输出一个 JSON object，例如 {"section_id":"...","section_text":"..."}。'
+                "请先判断 coordinator 当前关于 write_section 的方案是否合理，再补写目标 section_id 对应的 section_text。"
+                "如果 section_id 不合理、上下文不足或更适合改动作，请在 feedback 中明确指出。"
+                "不要直接 finalize，也不要输出 BrainStepResult。"
+                '最终只输出一个 JSON object，例如 {"section_id":"...","section_text":"...","feedback":{"verdict":"support","rationale":"..."}}。'
             )
         if action_taken == "revise_draft":
             return (
-                "主控已锁定当前动作为 revise_draft。你只负责根据质量 backlog、自评与当前正文生成 revised_text。"
-                "优先遵循 Writing Brief 与 Locked Coordinator Decision，针对 dominant_issue 和 open_gaps 做实质修订。"
-                "必须保留已要求保留的事实、结构和口径，不要改动作，不要输出 BrainStepResult。"
-                '最终只输出一个 JSON object，例如 {"revised_text":"..."}。'
+                "请先判断 coordinator 当前关于 revise_draft 的方案是否合理，再根据当前正文生成 revised_text。"
+                "如果问题并非修订能解决，而是需要补材料、重建结构或 ask_user，请在 feedback 中明确提出。"
+                "必须保留已要求保留的事实、结构和口径，不要直接 finalize，也不要输出 BrainStepResult。"
+                '最终只输出一个 JSON object，例如 {"revised_text":"...","feedback":{"verdict":"redirect","recommended_action":"ask_user","rationale":"..."}}。'
             )
         if action_taken == "polish_language":
             return (
-                "主控已锁定当前动作为 polish_language。你只负责做语言层润色，输出 polished_text。"
-                "优先遵循 Writing Brief 与 Locked Coordinator Decision，在不改变事实与结构的前提下提升正式度、紧凑度与可交付性。"
-                "不要凭空新增事实，不要改变核心结构与行动项，不要改动作，不要输出 BrainStepResult。"
-                '最终只输出一个 JSON object，例如 {"polished_text":"..."}。'
+                "请先判断 coordinator 当前关于 polish_language 的方案是否合理，再输出 polished_text。"
+                "如果问题并不只是语言层，而是结构、材料或任务边界问题，请在 feedback 中明确指出。"
+                "不要凭空新增事实，不要直接 finalize，也不要输出 BrainStepResult。"
+                '最终只输出一个 JSON object，例如 {"polished_text":"...","feedback":{"verdict":"support","rationale":"..."}}。'
             )
         return (
-            "主控已锁定当前动作。你只负责生成该动作需要的中间产物，不要改动作，"
-            "不要 ask_user，不要 finalize，不要输出 BrainStepResult。"
+            "请先评估 coordinator 当前方案，再生成该动作所需的中间产物。"
+            "你可以在 feedback 中表达支持、反对、补充和替代建议，但不要直接 finalize，不要输出 BrainStepResult。"
             "最终只输出一个 JSON object。"
         )
 
     def _build_specialist_guardrails(self) -> str:
         return (
             "共同约束："
-            "1. 优先遵循 Writing Brief、Directive Ledger、Evidence Snapshot 和 Locked Coordinator Decision。"
+            "1. 优先遵循 Writing Brief、Directive Ledger、Evidence Snapshot 和 Coordinator Proposal。"
             "2. 输出必须符合中文公文语体，表达正式、克制、清楚，不写口号式空话。"
             "3. 没有证据支持的事实、数据、案例、单位表态、责任安排，不得擅自补写成既成事实。"
             "4. 措施表述要尽量写清抓手、责任主体、推进方式和闭环要求，不要只写原则态度。"
-            "5. 如果现有信息只够形成局部文本或保守表达，就保持克制，不要为了完整而编造。"
-            "6. 最终只输出一个 JSON object，不得输出解释、Markdown 代码块或额外分析。"
+            "5. 如果你认为 coordinator 当前方案不够好，可以在 feedback 中明确提出更合适的 action、理由、假设和主要风险。"
+            "6. 如果现有信息只够形成局部文本或保守表达，就保持克制，不要为了完整而编造。"
+            "7. 最终只输出一个 JSON object，不得输出解释、Markdown 代码块或额外分析。"
         )
 
     def _build_outline_specialist_instructions(self) -> str:
         return (
             "你是 super-gongwen-agent 的 outline_specialist。"
-            "你只负责把当前任务整理成结构完整、层次清楚、可用于后续起草的提纲中间产物。"
-            "你不是最终决策者，不能决定 action_taken，也不能 ask_user 或 finalize。"
+            "你负责评估当前提纲策略是否合适，并把任务整理成结构完整、层次清楚、可用于后续起草的提纲中间产物。"
+            "你不是最终决策者，不能直接 finalize，但可以建议 coordinator 改动作或 ask_user。"
             + self._build_specialist_guardrails()
         )
 
     def _build_draft_specialist_instructions(self) -> str:
         return (
             "你是 super-gongwen-agent 的 draft_specialist。"
-            "你只负责生成正文、分节正文或修订稿等中间文本产物。"
-            "你不是最终决策者，不能改变 action_taken，也不能 ask_user 或 finalize。"
+            "你负责评估当前正文推进策略是否合适，并生成正文、分节正文或修订稿等中间文本产物。"
+            "你不是最终决策者，不能直接 finalize，但可以建议 coordinator 改动作或 ask_user。"
             + self._build_specialist_guardrails()
         )
 
     def _build_polish_specialist_instructions(self) -> str:
         return (
             "你是 super-gongwen-agent 的 polish_specialist。"
-            "你只负责润色语言表达、提升正式度与可交付性，不负责新增事实或改变结构。"
-            "你不是最终决策者，不能改变 action_taken，也不能 ask_user 或 finalize。"
+            "你负责评估当前是否适合做语言层润色，并在必要时输出 polished_text。"
+            "你不负责新增事实或擅改结构，也不能直接 finalize，但可以建议 coordinator 改动作或 ask_user。"
             + self._build_specialist_guardrails()
         )
 
@@ -1043,19 +1464,20 @@ class AgentsSdkBrainRunner:
             "3. 即使模型会生成 <think> 或推理内容，你也必须在最后给出完整 JSON object。\n"
             "4. build_outline、write_draft、write_section、revise_draft、polish_language、ask_user、finalize 都不是工具名；它们只能出现在最终 JSON 的 action_taken 中，绝不能以 tool/function call 方式调用。\n"
             "5. 不要输出 tool_requests 之类的中间协议字段。\n"
+            "6. 如适用，请同时输出 business_completion_declared、completion_mode、decision_rationale、assumptions、major_risks。\n"
         )
         if allow_tools:
             tool_suffix += (
-                "6. 当前只允许使用 search、list、read、grep 访问 materials 内材料。\n"
-                "7. 优先 search 或 list 找文件，再用 read；只有需要精确定位短语时再用 grep。\n"
-                "8. 需要补材料时直接调用可用工具，工具调用结束后继续输出最终 BrainStepResult JSON。\n"
+                "7. 当前只允许使用 search、list、read、grep 访问 materials 内材料。\n"
+                "8. 优先 search 或 list 找文件，再用 read；只有需要精确定位短语时再用 grep。\n"
+                "9. 需要补材料时直接调用可用工具，工具调用结束后继续输出最终 BrainStepResult JSON。\n"
             )
         else:
             tool_suffix += (
-                "6. 本轮已禁用全部工具；你不能再调用任何工具，只能直接输出 JSON 决策。\n"
+                "7. 本轮已禁用全部工具；你不能再调用任何工具，只能直接输出 JSON 决策。\n"
             )
         if recovery_note:
-            tool_suffix += f"9. {str(recovery_note).strip()}\n"
+            tool_suffix += f"10. {str(recovery_note).strip()}\n"
         normalized += tool_suffix
         return normalized
 
