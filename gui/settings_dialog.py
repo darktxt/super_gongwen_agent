@@ -38,9 +38,9 @@ class SettingsDialog:
         container.columnconfigure(1, weight=1)
 
         field_labels = {
-            "OPENAI_API_KEY": "OPENAI_API_KEY",
-            "OPENAI_BASE_URL": "OPENAI_BASE_URL",
-            "OPENAI_MODEL": "OPENAI_MODEL",
+            "LITELLM_MODEL": "LITELLM_MODEL（必填）",
+            "LITELLM_API_KEY": "LITELLM_API_KEY（按需）",
+            "LITELLM_BASE_URL": "LITELLM_BASE_URL（按需）",
         }
 
         for row_index, key in enumerate(GUI_CONFIG_KEYS):
@@ -55,12 +55,12 @@ class SettingsDialog:
                 container,
                 textvariable=self._string_vars[key],
                 width=42,
-                show="*" if key == "OPENAI_API_KEY" else "",
+                show="*" if key == "LITELLM_API_KEY" else "",
             )
             entry.grid(row=row_index, column=1, sticky="ew", pady=6)
             self._entries[key] = entry
 
-            if key == "OPENAI_API_KEY":
+            if key == "LITELLM_API_KEY":
                 toggle = ttk.Checkbutton(
                     container,
                     text="显示",
@@ -85,7 +85,7 @@ class SettingsDialog:
         ttk.Button(button_row, text="关闭", command=self.close).grid(row=0, column=2)
 
     def _toggle_api_key_visibility(self) -> None:
-        entry = self._entries["OPENAI_API_KEY"]
+        entry = self._entries["LITELLM_API_KEY"]
         entry.configure(show="" if self._show_api_key.get() else "*")
 
     def _collect_values(self) -> dict[str, str]:

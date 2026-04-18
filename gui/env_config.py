@@ -7,9 +7,9 @@ from config import PROJECT_ROOT
 
 
 GUI_CONFIG_KEYS = (
-    "OPENAI_API_KEY",
-    "OPENAI_BASE_URL",
-    "OPENAI_MODEL",
+    "LITELLM_MODEL",
+    "LITELLM_API_KEY",
+    "LITELLM_BASE_URL",
 )
 
 

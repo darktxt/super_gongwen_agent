@@ -21,15 +21,35 @@ class AppConfig:
     default_encoding: str = "utf-8"
     openai_agents_enable_tracing: bool = True
     openai_agents_output_mode: str = "auto"
-    openai_api_key: str = ""
-    openai_base_url: str = ""
-    openai_model: str = ""
-    openai_timeout: float = 300.0
-    openai_temperature: float | None = None
+    litellm_api_key: str = ""
+    litellm_base_url: str = ""
+    litellm_model: str = ""
+    litellm_timeout: float = 300.0
+    litellm_temperature: float | None = None
+
+    @property
+    def openai_api_key(self) -> str:
+        return self.litellm_api_key
+
+    @property
+    def openai_base_url(self) -> str:
+        return self.litellm_base_url
+
+    @property
+    def openai_model(self) -> str:
+        return self.litellm_model
+
+    @property
+    def openai_timeout(self) -> float:
+        return self.litellm_timeout
+
+    @property
+    def openai_temperature(self) -> float | None:
+        return self.litellm_temperature
 
 
-def default_openai_timeout() -> float:
-    return float(AppConfig.__dataclass_fields__["openai_timeout"].default)
+def default_litellm_timeout() -> float:
+    return float(AppConfig.__dataclass_fields__["litellm_timeout"].default)
 
 
 def resolve_app_home(base_dir: str | Path | None = None) -> Path:
@@ -56,11 +76,17 @@ def load_config(base_dir: str | Path | None = None) -> AppConfig:
             "OPENAI_AGENTS_OUTPUT_MODE",
             default="auto",
         ),
-        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
-        openai_base_url=os.getenv("OPENAI_BASE_URL", "").strip(),
-        openai_model=os.getenv("OPENAI_MODEL", "").strip(),
-        openai_timeout=_read_float_env("OPENAI_TIMEOUT", default_openai_timeout()),
-        openai_temperature=_read_optional_float_env("OPENAI_TEMPERATURE"),
+        litellm_api_key=_read_first_text_env("LITELLM_API_KEY", "OPENAI_API_KEY"),
+        litellm_base_url=os.getenv("LITELLM_BASE_URL", "").strip(),
+        litellm_model=_read_first_text_env("LITELLM_MODEL", "OPENAI_MODEL"),
+        litellm_timeout=_read_first_float_env(
+            ("LITELLM_TIMEOUT", "OPENAI_TIMEOUT"),
+            default_litellm_timeout(),
+        ),
+        litellm_temperature=_read_first_optional_float_env(
+            "LITELLM_TEMPERATURE",
+            "OPENAI_TEMPERATURE",
+        ),
     )
 
 
@@ -119,24 +145,36 @@ def _load_dotenv_file(dotenv_path: Path) -> None:
         os.environ[key] = normalized
 
 
-def _read_float_env(name: str, default: float) -> float:
-    raw_value = os.getenv(name, "").strip()
-    if not raw_value:
-        return default
-    try:
-        return float(raw_value)
-    except ValueError:
-        return default
+def _read_first_text_env(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
-def _read_optional_float_env(name: str) -> float | None:
-    raw_value = os.getenv(name, "").strip()
-    if not raw_value:
-        return None
-    try:
-        return float(raw_value)
-    except ValueError:
-        return None
+def _read_first_float_env(names: tuple[str, ...], default: float) -> float:
+    for name in names:
+        raw_value = os.getenv(name, "").strip()
+        if not raw_value:
+            continue
+        try:
+            return float(raw_value)
+        except ValueError:
+            continue
+    return default
+
+
+def _read_first_optional_float_env(*names: str) -> float | None:
+    for name in names:
+        raw_value = os.getenv(name, "").strip()
+        if not raw_value:
+            continue
+        try:
+            return float(raw_value)
+        except ValueError:
+            continue
+    return None
 
 
 def _read_bool_env(name: str, *, default: bool) -> bool:

@@ -8,20 +8,21 @@ from typing import Any, Callable
 
 from agents_runtime.tools import list_material_tool_specs
 from config import AppConfig, load_config
-from editorial_brain.context_compiler import ContextCompiler
-from editorial_brain.contracts_core import BrainStepResult, CONTROL_ONLY_ACTIONS
-from editorial_brain.output_parser import OutputParseError
-from editorial_brain.quality_gate_v2 import QualityGate, QualityGateError
-from editorial_brain.runtime_contracts import BrainRunError
+from agents_runtime.context import ContextCompiler
+from agents_runtime.protocol import (
+    BrainRunError,
+    BrainStepResult,
+    CONTROL_ONLY_ACTIONS,
+    OutputParseError,
+)
+from orchestration import WorkflowCoordinator
 from observability.events import ObservabilityEventWriter
 from observability.logger import build_app_logger, log_structured
 from observability.metrics import MetricsCollector
 from runtime_factory import build_brain_runner
 from session_storage.paths import build_session_paths
 from session_storage.history import initialize_session_storage, save_final_output
-from skill_system.catalog import SkillCatalog
-from skill_system.guard import SkillSelectionGuard
-from skill_system.tool import SkillTool
+from utils.clock import utc_now_iso
 from utils.session_ids import generate_session_id
 from workspace.patcher import WorkspacePatcher
 from workspace.models import DebugRoundSummary, OutlineSection, WorkspaceState
@@ -60,12 +61,8 @@ class SuperGongwenApp:
         self,
         config: AppConfig | None = None,
         *,
-        skill_catalog: SkillCatalog | None = None,
-        skill_tool: SkillTool | None = None,
-        skill_guard: SkillSelectionGuard | None = None,
         context_compiler: ContextCompiler | None = None,
         brain_runner: Any | None = None,
-        quality_gate: QualityGate | None = None,
         workspace_patcher: WorkspacePatcher | None = None,
         logger: logging.Logger | None = None,
         metrics: MetricsCollector | None = None,
@@ -76,13 +73,10 @@ class SuperGongwenApp:
     ) -> None:
         self.config = config or load_config()
         self.workspace_store = WorkspaceStore(app_home=self.config.app_home)
-        self.skill_catalog = skill_catalog or SkillCatalog.from_loader()
-        self.skill_tool = skill_tool or SkillTool(self.skill_catalog)
-        self.skill_guard = skill_guard or SkillSelectionGuard(self.skill_catalog)
         self.context_compiler = context_compiler or ContextCompiler()
         self.brain_runner = brain_runner or build_brain_runner(config=self.config)
-        self.quality_gate = quality_gate or QualityGate()
         self.workspace_patcher = workspace_patcher or WorkspacePatcher()
+        self.workflow_coordinator = WorkflowCoordinator()
         self.logger = logger or build_app_logger()
         self.metrics = metrics or MetricsCollector()
         self.event_writer = event_writer or ObservabilityEventWriter(app_home=self.config.app_home)
@@ -120,11 +114,10 @@ class SuperGongwenApp:
         self,
         session_id: str,
         user_input: str,
-        *,
-        max_rounds: int = 8,
     ) -> TurnRunResult:
         workspace = self.workspace_store.load_or_create(session_id=session_id)
         self.workspace_patcher.ingest_user_message(workspace, user_input)
+        self.workflow_coordinator.initialize_for_user_message(workspace)
         workspace.debug_state.last_user_input = user_input.strip()
         workspace.debug_state.last_event = "turn_started"
         workspace.debug_state.last_error = ""
@@ -134,7 +127,6 @@ class SuperGongwenApp:
             session_id,
             "turn_started",
             level=logging.INFO,
-            max_rounds=max_rounds,
             has_user_input=bool(user_input.strip()),
             workspace_summary=self._summarize_workspace(workspace),
         )
@@ -147,7 +139,8 @@ class SuperGongwenApp:
         last_tool_results: list[dict[str, Any]] = []
 
         try:
-            for rounds_used in range(1, max_rounds + 1):
+            while True:
+                rounds_used += 1
                 self._report_user_progress(f"第 {rounds_used} 轮：正在分析需求与材料。")
                 round_debug_files: dict[str, str] = {}
                 workspace_before_summary = self._summarize_workspace(workspace)
@@ -161,8 +154,6 @@ class SuperGongwenApp:
                 )
                 snapshot = self.workspace_store.snapshot(
                     workspace,
-                    available_skills=self.skill_catalog.list_cards(),
-                    active_skills=self.skill_catalog.get_active_specs(workspace.active_skills),
                     available_tools=self._list_available_tools(),
                 )
                 compiled = self.context_compiler.build(snapshot)
@@ -295,6 +286,7 @@ class SuperGongwenApp:
                     round_debug_files=round_debug_files,
                 )
                 response_summary = self._summarize_llm_response(brain_result.response)
+                self._record_runtime_profile(workspace, brain_result.response)
                 response_debug_file = self._write_round_debug_file(
                     session_id,
                     rounds_used,
@@ -400,130 +392,34 @@ class SuperGongwenApp:
                     response_summary=response_summary,
                 )
 
-                self.skill_guard.ensure_valid(step, snapshot)
                 self._record_step_meta(workspace, step)
                 self._update_workspace_self_review(workspace, step)
-
-                skill_request = self._resolve_skill_request(step)
-                if skill_request is not None:
-                    skill_result = self.skill_tool.execute(skill_request, workspace)
-                    if skill_result is not None:
-                        self.workspace_patcher.apply_skill_result(workspace, skill_result)
-                        self.metrics.increment(
-                            "skill_load_count",
-                            len(list(skill_result.get("resolved_skill_ids", []) or [])),
-                        )
-                        self._record_runtime_event(
-                            session_id,
-                            "skills_loaded",
-                            level=logging.INFO,
-                            round_no=rounds_used,
-                            skill_result=skill_result,
-                        )
-                    workspace_summary = self._summarize_workspace(workspace)
-                    self._update_round_debug_state(
+                if step.action_taken not in CONTROL_ONLY_ACTIONS:
+                    self._record_quality_review_snapshot(
                         workspace,
-                        round_no=rounds_used,
-                        event_name="workspace_checkpoint_saved",
-                        action_taken=step.action_taken,
-                        result_status="continued",
-                        compiled_summary=compiled_summary,
-                        request_summary=request_summary,
-                        response_summary=response_summary,
+                        step,
+                        source="brain_step",
                         step_summary=step_summary,
-                        debug_files=round_debug_files,
-                        workspace_summary=workspace_summary,
                     )
-                    checkpoint_debug_file = self._write_round_debug_file(
-                        session_id,
-                        rounds_used,
-                        "workspace_after_load_skill",
-                        workspace.to_dict(),
-                        round_debug_files=round_debug_files,
-                    )
-                    self._update_round_debug_state(
-                        workspace,
-                        round_no=rounds_used,
-                        event_name="workspace_checkpoint_saved",
-                        action_taken=step.action_taken,
-                        result_status="continued",
-                        compiled_summary=compiled_summary,
-                        request_summary=request_summary,
-                        response_summary=response_summary,
-                        step_summary=step_summary,
-                        debug_files=round_debug_files,
-                        workspace_summary=workspace_summary,
-                    )
-                    self.workspace_store.save(workspace)
-                    self._report_round_result(
-                        TurnRunResult(
-                            session_id=session_id,
-                            status="continued",
-                            rounds_used=rounds_used,
-                            llm_raw_output=last_llm_raw_output,
-                            tool_requests=tool_requests,
-                            tool_results=tool_results,
-                            step=step,
-                            workspace=workspace,
-                        )
-                    )
-                    self._record_runtime_event(
-                        session_id,
-                        "workspace_checkpoint_saved",
-                        level=logging.INFO,
-                        round_no=rounds_used,
-                        reason="after_load_skill",
-                        workspace_summary=workspace_summary,
-                        debug_file=checkpoint_debug_file,
-                    )
-                    continue
 
                 if step.ask_user:
                     question_pack = list(getattr(step.action_payload, "question_pack", []) or [])
                     workspace.pending_questions = list(question_pack)
-                    workspace_summary = self._summarize_workspace(workspace)
-                    self._update_round_debug_state(
-                        workspace,
+                    self.workflow_coordinator.transition_after_step(workspace, step)
+                    self._checkpoint_workspace(
+                        session_id=session_id,
                         round_no=rounds_used,
-                        event_name="turn_needs_user_input",
-                        action_taken=step.action_taken,
-                        result_status="needs_user_input",
-                        compiled_summary=compiled_summary,
-                        request_summary=request_summary,
-                        response_summary=response_summary,
-                        step_summary=step_summary,
-                        debug_files=round_debug_files,
-                        workspace_summary=workspace_summary,
-                    )
-                    checkpoint_debug_file = self._write_round_debug_file(
-                        session_id,
-                        rounds_used,
-                        "workspace_after_ask_user",
-                        workspace.to_dict(),
-                        round_debug_files=round_debug_files,
-                    )
-                    self._update_round_debug_state(
-                        workspace,
-                        round_no=rounds_used,
-                        event_name="turn_needs_user_input",
-                        action_taken=step.action_taken,
-                        result_status="needs_user_input",
-                        compiled_summary=compiled_summary,
-                        request_summary=request_summary,
-                        response_summary=response_summary,
-                        step_summary=step_summary,
-                        debug_files=round_debug_files,
-                        workspace_summary=workspace_summary,
-                    )
-                    self.workspace_store.save(workspace)
-                    self._record_runtime_event(
-                        session_id,
-                        "workspace_checkpoint_saved",
-                        level=logging.INFO,
-                        round_no=rounds_used,
+                        label="workspace_after_ask_user",
                         reason="after_ask_user",
-                        workspace_summary=workspace_summary,
-                        debug_file=checkpoint_debug_file,
+                        workspace=workspace,
+                        event_name="turn_needs_user_input",
+                        action_taken=step.action_taken,
+                        result_status="needs_user_input",
+                        compiled_summary=compiled_summary,
+                        request_summary=request_summary,
+                        response_summary=response_summary,
+                        step_summary=step_summary,
+                        debug_files=round_debug_files,
                     )
                     self.metrics.increment("needs_user_input_count")
                     self._record_runtime_event(
@@ -558,78 +454,31 @@ class SuperGongwenApp:
                     revision_history_entries,
                 )
 
+                self.workflow_coordinator.transition_after_step(workspace, step)
+
                 if step.done:
-                    try:
-                        gate_result = self.quality_gate.ensure_passed(workspace, step)
-                    except QualityGateError as exc:
-                        workspace.session_meta["quality_gate_notes"] = list(exc.reasons)
-                        self._record_runtime_event(
-                            session_id,
-                            "quality_gate_failed",
-                            level=logging.WARNING,
-                            round_no=rounds_used,
-                            reasons=list(exc.reasons),
-                        )
-                        raise
-                    workspace.session_meta["quality_gate_notes"] = list(gate_result.reasons)
-                    if gate_result.reasons:
-                        self._record_runtime_event(
-                            session_id,
-                            "quality_gate_notice",
-                            level=logging.INFO,
-                            round_no=rounds_used,
-                            reasons=list(gate_result.reasons),
-                        )
+                    final_text = self._resolve_final_text_for_export(workspace, step)
                     final_output_path = str(
                         save_final_output(
                             session_id,
-                            gate_result.final_text,
+                            final_text,
                             app_home=self.config.app_home,
                         )
                     )
-                    workspace_summary = self._summarize_workspace(workspace)
-                    self._update_round_debug_state(
-                        workspace,
+                    self._checkpoint_workspace(
+                        session_id=session_id,
                         round_no=rounds_used,
-                        event_name="turn_completed",
-                        action_taken=step.action_taken,
-                        result_status="completed",
-                        compiled_summary=compiled_summary,
-                        request_summary=request_summary,
-                        response_summary=response_summary,
-                        step_summary=step_summary,
-                        debug_files=round_debug_files,
-                        workspace_summary=workspace_summary,
-                    )
-                    checkpoint_debug_file = self._write_round_debug_file(
-                        session_id,
-                        rounds_used,
-                        "workspace_after_finalize",
-                        workspace.to_dict(),
-                        round_debug_files=round_debug_files,
-                    )
-                    self._update_round_debug_state(
-                        workspace,
-                        round_no=rounds_used,
-                        event_name="turn_completed",
-                        action_taken=step.action_taken,
-                        result_status="completed",
-                        compiled_summary=compiled_summary,
-                        request_summary=request_summary,
-                        response_summary=response_summary,
-                        step_summary=step_summary,
-                        debug_files=round_debug_files,
-                        workspace_summary=workspace_summary,
-                    )
-                    self.workspace_store.save(workspace)
-                    self._record_runtime_event(
-                        session_id,
-                        "workspace_checkpoint_saved",
-                        level=logging.INFO,
-                        round_no=rounds_used,
+                        label="workspace_after_finalize",
                         reason="after_finalize",
-                        workspace_summary=workspace_summary,
-                        debug_file=checkpoint_debug_file,
+                        workspace=workspace,
+                        event_name="turn_completed",
+                        action_taken=step.action_taken,
+                        result_status="completed",
+                        compiled_summary=compiled_summary,
+                        request_summary=request_summary,
+                        response_summary=response_summary,
+                        step_summary=step_summary,
+                        debug_files=round_debug_files,
                     )
                     self.metrics.increment("completed_turn_count")
                     self._record_runtime_event(
@@ -643,7 +492,7 @@ class SuperGongwenApp:
                         session_id=session_id,
                         status="completed",
                         rounds_used=rounds_used,
-                        final_text=gate_result.final_text,
+                        final_text=final_text,
                         final_output_path=final_output_path,
                         llm_raw_output=last_llm_raw_output,
                         tool_requests=tool_requests,
@@ -652,95 +501,32 @@ class SuperGongwenApp:
                         workspace=workspace,
                     )
 
-                workspace_summary = self._summarize_workspace(workspace)
-                self._update_round_debug_state(
-                    workspace,
+                self._checkpoint_workspace(
+                    session_id=session_id,
                     round_no=rounds_used,
-                    event_name="workspace_checkpoint_saved",
-                    action_taken=step.action_taken,
-                    result_status="continued",
-                    compiled_summary=compiled_summary,
-                    request_summary=request_summary,
-                    response_summary=response_summary,
-                    step_summary=step_summary,
-                    debug_files=round_debug_files,
-                    workspace_summary=workspace_summary,
-                )
-                checkpoint_debug_file = self._write_round_debug_file(
-                    session_id,
-                    rounds_used,
-                    "workspace_after_action",
-                    workspace.to_dict(),
-                    round_debug_files=round_debug_files,
-                )
-                self._update_round_debug_state(
-                    workspace,
-                    round_no=rounds_used,
-                    event_name="workspace_checkpoint_saved",
-                    action_taken=step.action_taken,
-                    result_status="continued",
-                    compiled_summary=compiled_summary,
-                    request_summary=request_summary,
-                    response_summary=response_summary,
-                    step_summary=step_summary,
-                    debug_files=round_debug_files,
-                    workspace_summary=workspace_summary,
-                )
-                self.workspace_store.save(workspace)
-                self._report_round_result(
-                        TurnRunResult(
-                            session_id=session_id,
-                            status="continued",
-                            rounds_used=rounds_used,
-                            llm_raw_output=last_llm_raw_output,
-                            tool_requests=tool_requests,
-                            tool_results=tool_results,
-                            step=step,
-                            workspace=workspace,
-                        )
-                    )
-                self._record_runtime_event(
-                    session_id,
-                    "workspace_checkpoint_saved",
-                    level=logging.INFO,
-                    round_no=rounds_used,
+                    label="workspace_after_action",
                     reason="after_action",
-                    workspace_summary=workspace_summary,
-                    debug_file=checkpoint_debug_file,
+                    workspace=workspace,
+                    event_name="workspace_checkpoint_saved",
+                    action_taken=step.action_taken,
+                    result_status="continued",
+                    compiled_summary=compiled_summary,
+                    request_summary=request_summary,
+                    response_summary=response_summary,
+                    step_summary=step_summary,
+                    debug_files=round_debug_files,
+                    turn_result=TurnRunResult(
+                        session_id=session_id,
+                        status="continued",
+                        rounds_used=rounds_used,
+                        llm_raw_output=last_llm_raw_output,
+                        tool_requests=tool_requests,
+                        tool_results=tool_results,
+                        step=step,
+                        workspace=workspace,
+                    ),
                 )
                 continue
-
-            workspace_summary = self._summarize_workspace(workspace)
-            self._update_round_debug_state(
-                workspace,
-                round_no=rounds_used,
-                event_name="turn_max_rounds_exceeded",
-                action_taken=getattr(last_step, "action_taken", ""),
-                result_status="max_rounds_exceeded",
-                debug_files={},
-                workspace_summary=workspace_summary,
-                error_message="Turn exceeded max_rounds before completion.",
-            )
-            self.workspace_store.save(workspace)
-            self.metrics.increment("max_rounds_exceeded_count")
-            self._record_runtime_event(
-                session_id,
-                "turn_max_rounds_exceeded",
-                level=logging.WARNING,
-                rounds_used=rounds_used,
-                workspace_summary=workspace_summary,
-            )
-            return TurnRunResult(
-                session_id=session_id,
-                status="max_rounds_exceeded",
-                rounds_used=rounds_used,
-                llm_raw_output=last_llm_raw_output,
-                tool_requests=last_tool_requests,
-                tool_results=last_tool_results,
-                step=last_step,
-                workspace=workspace,
-                error_message="Turn exceeded max_rounds before completion.",
-            )
         except Exception as exc:
             workspace_summary = self._summarize_workspace(workspace)
             error_round_no = rounds_used or 1
@@ -818,7 +604,10 @@ class SuperGongwenApp:
 
     def _summarize_workspace(self, workspace: WorkspaceState) -> dict[str, Any]:
         return {
-            "active_skill_ids": list(workspace.active_skill_ids),
+            "workflow_phase": str(workspace.workflow_state.current_phase or ""),
+            "workflow_next_phase_hint": str(workspace.workflow_state.next_phase_hint or ""),
+            "workflow_phase_history": list(workspace.workflow_state.phase_history[-6:]),
+            "quality_backlog_count": len(workspace.quality_backlog.items),
             "selected_material_count": len(workspace.material_catalog.selected_files),
             "material_item_count": len(workspace.material_catalog.items),
             "retrieved_excerpt_count": len(workspace.retrieved_materials.excerpts),
@@ -842,17 +631,11 @@ class SuperGongwenApp:
         }
 
     def _summarize_compiled_context(self, compiled: Any) -> dict[str, Any]:
-        context_blocks = [
-            compiled.action_playbook_block,
-            compiled.skill_listing_block,
-            *compiled.active_skill_blocks,
-            *compiled.attached_context_blocks,
-        ]
+        context_blocks = [compiled.action_playbook_block, *compiled.attached_context_blocks]
         return {
             "block_count": len(context_blocks),
             "block_titles": [block.title for block in context_blocks],
             "truncated_block_titles": list(compiled.token_budget_report.truncated_block_titles),
-            "active_skill_block_count": len(compiled.active_skill_blocks),
             "system_prompt_chars": len(compiled.system_prompt),
             "user_prompt_chars": len(compiled.user_prompt),
             "char_budget": compiled.token_budget_report.char_budget,
@@ -901,13 +684,11 @@ class SuperGongwenApp:
         workspace: WorkspaceState | None = None,
         tool_requests: list[Any] | None = None,
     ) -> dict[str, Any]:
-        skill_request = self._resolve_skill_request(step)
         effective_tool_requests = list(tool_requests or [])
         summary = {
             "action_taken": step.action_taken,
             "ask_user": step.ask_user,
             "done": step.done,
-            "has_skill_request": skill_request is not None,
             "tool_request_count": len(effective_tool_requests),
             "tool_names": [
                 self._tool_request_name(request)
@@ -939,24 +720,6 @@ class SuperGongwenApp:
         tool_requests: list[Any] | None = None,
     ) -> str:
         action = str(step.action_taken or "").strip()
-        if action == "load_skill":
-            skill_request = self._resolve_skill_request(step) or {}
-            primary_skill_id = str(skill_request.get("primary_skill_id", "") or "").strip()
-            revision_skill_ids = [
-                str(skill_id).strip()
-                for skill_id in list(skill_request.get("revision_skill_ids", []) or [])
-                if str(skill_id).strip()
-            ]
-            if revision_skill_ids:
-                return (
-                    "已请求加载写作 skill：主 skill 为 "
-                    + primary_skill_id
-                    + "；辅助 skill 为 "
-                    + "、".join(revision_skill_ids)
-                    + "。"
-                )
-            return "已请求加载写作 skill：" + primary_skill_id + "。"
-
         if action == "build_outline":
             outline_sections = list(getattr(step.action_payload, "outline_sections", []) or [])
             headings: list[str] = []
@@ -1033,11 +796,6 @@ class SuperGongwenApp:
         if isinstance(request, dict):
             return str(request.get("tool_name", "") or "").strip()
         return str(getattr(request, "tool_name", "") or "").strip()
-
-    def _tool_request_arguments(self, request: Any) -> dict[str, Any]:
-        if isinstance(request, dict):
-            return dict(request.get("arguments", {}) or {})
-        return dict(getattr(request, "arguments", {}) or {})
 
     def _build_read_materials_round_summary(
         self,
@@ -1281,7 +1039,6 @@ class SuperGongwenApp:
             truncated_block_titles=list(
                 effective_compiled_summary.get("truncated_block_titles", []) or []
             ),
-            active_skill_ids=list(effective_workspace_summary.get("active_skill_ids", []) or []),
             tool_names=list(effective_step_summary.get("tool_names", []) or []),
             question_count=int(effective_workspace_summary.get("pending_question_count", 0) or 0),
             outline_status=str(effective_workspace_summary.get("outline_status", "") or ""),
@@ -1309,6 +1066,61 @@ class SuperGongwenApp:
         history = workspace.session_meta.setdefault("action_history", [])
         history.append(step.action_taken)
         workspace.session_meta["last_action"] = step.action_taken
+
+    def _record_runtime_profile(self, workspace: WorkspaceState, response: Any) -> None:
+        raw_payload = dict(getattr(response, "raw_payload", {}) or {})
+        runtime_workflow = str(raw_payload.get("runtime_workflow", "") or "").strip()
+        if runtime_workflow:
+            workspace.session_meta["runtime_workflow"] = runtime_workflow
+        provider_profile = raw_payload.get("provider_profile")
+        if isinstance(provider_profile, dict):
+            workspace.session_meta["provider_profile"] = dict(provider_profile)
+
+    def _record_quality_review_snapshot(
+        self,
+        workspace: WorkspaceState,
+        step: BrainStepResult,
+        *,
+        source: str,
+        step_summary: dict[str, Any] | None = None,
+    ) -> None:
+        snapshots = list(workspace.session_meta.get("quality_review_snapshots", []) or [])
+        snapshot = {
+            "created_at": utc_now_iso(),
+            "source": str(source or "").strip() or "brain_step",
+            "action_taken": step.action_taken,
+            "dominant_issue": str(step.self_review.dominant_issue or "").strip(),
+            "open_gaps": [
+                str(item).strip()
+                for item in list(step.self_review.open_gaps or [])
+                if str(item).strip()
+            ][:5],
+            "responded_directives": [
+                str(item).strip()
+                for item in list(step.self_review.responded_directives or [])
+                if str(item).strip()
+            ],
+            "content_status_summary": str(step.self_review.content_status_summary or "").strip(),
+            "language_status_summary": str(step.self_review.language_status_summary or "").strip(),
+            "notes": [
+                str(item).strip()
+                for item in list(step.self_review.notes or [])
+                if str(item).strip()
+            ][:5],
+            "output_digest": str((step_summary or {}).get("output_digest", "") or ""),
+        }
+        snapshots.append(snapshot)
+        workspace.session_meta["quality_review_snapshots"] = snapshots[-8:]
+
+    def _resolve_final_text_for_export(
+        self,
+        workspace: WorkspaceState,
+        step: BrainStepResult,
+    ) -> str:
+        final_text = str(getattr(step.action_payload, "final_text", "") or "").strip()
+        if final_text:
+            return final_text
+        return str(workspace.draft_artifact.full_text or "").strip()
 
     def _apply_action_payload_fallbacks(
         self,
@@ -1400,16 +1212,6 @@ class SuperGongwenApp:
                 workspace.draft_artifact.word_count = len(final_text.replace(" ", ""))
                 workspace.draft_artifact.status = "finalized"
 
-    def _resolve_skill_request(self, step: BrainStepResult) -> Any:
-        if step.action_taken != "load_skill":
-            return None
-        if hasattr(step.action_payload, "to_dict"):
-            return step.action_payload.to_dict()
-        return step.action_payload
-
-    def _resolve_tool_requests(self, step: BrainStepResult) -> list[Any]:
-        return []
-
     def _update_workspace_self_review(
         self,
         workspace: WorkspaceState,
@@ -1451,7 +1253,7 @@ class SuperGongwenApp:
         for raw in raw_entries:
             entry = dict(raw)
             if not str(entry.get("source", "") or "").strip():
-                entry["source"] = "editorial_brain"
+                entry["source"] = "agents_runtime"
             if not str(entry.get("action_taken", "") or "").strip():
                 entry["action_taken"] = step.action_taken
             if not str(entry.get("summary", "") or "").strip():
@@ -1842,6 +1644,58 @@ class SuperGongwenApp:
         if self.round_reporter is None:
             return
         self.round_reporter(turn_result)
+
+    def _checkpoint_workspace(
+        self,
+        *,
+        session_id: str,
+        round_no: int,
+        label: str,
+        reason: str,
+        workspace: WorkspaceState,
+        event_name: str,
+        action_taken: str,
+        result_status: str,
+        compiled_summary: dict[str, Any] | None = None,
+        request_summary: dict[str, Any] | None = None,
+        response_summary: dict[str, Any] | None = None,
+        step_summary: dict[str, Any] | None = None,
+        debug_files: dict[str, str] | None = None,
+        turn_result: TurnRunResult | None = None,
+    ) -> None:
+        workspace_summary = self._summarize_workspace(workspace)
+        checkpoint_debug_file = self._write_round_debug_file(
+            session_id,
+            round_no,
+            label,
+            workspace.to_dict(),
+            round_debug_files=debug_files if debug_files is not None else {},
+        )
+        self._update_round_debug_state(
+            workspace,
+            round_no=round_no,
+            event_name=event_name,
+            action_taken=action_taken,
+            result_status=result_status,
+            compiled_summary=compiled_summary,
+            request_summary=request_summary,
+            response_summary=response_summary,
+            step_summary=step_summary,
+            debug_files=debug_files,
+            workspace_summary=workspace_summary,
+        )
+        self.workspace_store.save(workspace)
+        if turn_result is not None:
+            self._report_round_result(turn_result)
+        self._record_runtime_event(
+            session_id,
+            "workspace_checkpoint_saved",
+            level=logging.INFO,
+            round_no=round_no,
+            reason=reason,
+            workspace_summary=workspace_summary,
+            debug_file=checkpoint_debug_file,
+        )
 
 
 def create_app(

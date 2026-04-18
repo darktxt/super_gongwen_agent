@@ -512,12 +512,6 @@ class AppWindow:
         if round_context is not None:
             action_taken = str(getattr(round_context, "action_taken", "") or "").strip()
             action_label = str(getattr(round_context, "action_label", "") or "").strip()
-            primary_skill = str(getattr(round_context, "primary_skill_display", "") or "").strip()
-            revision_skills = [
-                str(item).strip()
-                for item in list(getattr(round_context, "revision_skill_displays", []) or [])
-                if str(item).strip()
-            ]
             material_actions = [
                 str(item).strip()
                 for item in list(getattr(round_context, "material_actions", []) or [])
@@ -533,16 +527,6 @@ class AppWindow:
             if action_taken:
                 lines.append("当前动作：")
                 lines.append(f"{action_taken}（{action_label or action_taken}）")
-            if primary_skill:
-                if lines:
-                    lines.append("")
-                lines.append("主写作 skill：")
-                lines.append(primary_skill)
-            if revision_skills:
-                if lines:
-                    lines.append("")
-                lines.append("修订 skill：")
-                lines.extend(f"{index}. {item}" for index, item in enumerate(revision_skills, start=1))
             if material_actions:
                 if lines:
                     lines.append("")

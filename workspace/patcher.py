@@ -8,7 +8,6 @@ from uuid import uuid4
 
 from utils.clock import utc_now_iso
 from .models import (
-    ActiveSkillsState,
     MaterialItem,
     MaterialExcerpt,
     OutlineArtifact,
@@ -382,36 +381,6 @@ class WorkspacePatcher:
             entries,
         )
         workspace.session_meta["updated_at"] = utc_now_iso()
-        return workspace
-
-    def apply_skill_result(
-        self,
-        workspace: WorkspaceState,
-        skill_result: dict[str, Any] | None,
-    ) -> WorkspaceState:
-        if not skill_result:
-            return workspace
-
-        workspace.active_skills = ActiveSkillsState(
-            primary_skill_id=str(skill_result.get("primary_skill_id", "") or "").strip(),
-            revision_skill_ids=[
-                str(skill_id).strip()
-                for skill_id in list(skill_result.get("revision_skill_ids", []) or [])
-                if str(skill_id).strip()
-            ][:2],
-        )
-        workspace.session_meta["updated_at"] = utc_now_iso()
-        return workspace
-
-    def apply_skill_results(
-        self,
-        workspace: WorkspaceState,
-        skill_results: Iterable[dict[str, Any]] | None,
-    ) -> WorkspaceState:
-        if not skill_results:
-            return workspace
-        for skill_result in skill_results:
-            self.apply_skill_result(workspace, skill_result)
         return workspace
 
     def apply_tool_results(

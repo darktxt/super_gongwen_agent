@@ -13,8 +13,18 @@ SENSITIVE_KEYS = {
     "api_key",
     "authorization",
     "openai_api_key",
+    "litellm_api_key",
     "x_api_key",
 }
+
+
+def _is_sensitive_key(key_text: str) -> bool:
+    normalized = str(key_text or "").strip().lower()
+    return (
+        normalized in SENSITIVE_KEYS
+        or normalized.endswith("_api_key")
+        or "authorization" in normalized
+    )
 
 
 def sanitize_sensitive_payload(
@@ -44,7 +54,7 @@ def sanitize_sensitive_payload(
         sanitized: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
-            if key_text.lower() in SENSITIVE_KEYS:
+            if _is_sensitive_key(key_text):
                 sanitized[key_text] = REDACTED_VALUE
                 continue
             sanitized[key_text] = sanitize_sensitive_payload(

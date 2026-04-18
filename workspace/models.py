@@ -14,7 +14,25 @@ def _default_session_meta() -> dict[str, Any]:
         "updated_at": timestamp,
         "latest_user_message": "",
         "user_messages": [],
+        "runtime_workflow": "",
+        "provider_profile": {},
+        "quality_review_snapshots": [],
+        "finalization_blockers": [],
+        "quality_review_notes": [],
     }
+
+
+def _ensure_session_meta_defaults(session_meta: Mapping[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(session_meta or {})
+    defaults = _default_session_meta()
+    for key, value in defaults.items():
+        if key not in normalized:
+            normalized[key] = value
+    return normalized
+
+
+def _default_phase_history() -> list[str]:
+    return ["intake"]
 
 
 @dataclass(slots=True)
@@ -37,52 +55,6 @@ class SeedArtifact(JsonDataclassMixin):
     length_hint: str | None = None
     required_points: list[str] = field(default_factory=list)
     input_files: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class ActiveSkillsState(JsonDataclassMixin):
-    primary_skill_id: str = ""
-    revision_skill_ids: list[str] = field(default_factory=list)
-
-    def resolved_skill_ids(self) -> list[str]:
-        skill_ids: list[str] = []
-        primary_skill_id = str(self.primary_skill_id).strip()
-        if primary_skill_id:
-            skill_ids.append(primary_skill_id)
-        for skill_id in self.revision_skill_ids:
-            normalized = str(skill_id).strip()
-            if normalized and normalized not in skill_ids:
-                skill_ids.append(normalized)
-        return skill_ids
-
-    def has_primary_skill(self) -> bool:
-        return bool(str(self.primary_skill_id).strip())
-
-    @classmethod
-    def from_skill_ids(cls, skill_ids: list[str]) -> "ActiveSkillsState":
-        normalized = [str(skill_id).strip() for skill_id in skill_ids if str(skill_id).strip()]
-        if not normalized:
-            return cls()
-
-        primary_skill_id = ""
-        revision_skill_ids: list[str] = []
-        for skill_id in normalized:
-            if skill_id.startswith("primary.") and not primary_skill_id:
-                primary_skill_id = skill_id
-                continue
-            if skill_id.startswith("revision."):
-                if skill_id not in revision_skill_ids:
-                    revision_skill_ids.append(skill_id)
-                continue
-            if not primary_skill_id:
-                primary_skill_id = skill_id
-            elif skill_id not in revision_skill_ids:
-                revision_skill_ids.append(skill_id)
-
-        return cls(
-            primary_skill_id=primary_skill_id,
-            revision_skill_ids=revision_skill_ids[:2],
-        )
 
 
 @dataclass(slots=True)
@@ -327,6 +299,17 @@ class QualityBacklog(JsonDataclassMixin):
 
 
 @dataclass(slots=True)
+class WorkflowState(JsonDataclassMixin):
+    current_phase: str = "intake"
+    last_completed_phase: str = ""
+    next_phase_hint: str = ""
+    last_transition: str = ""
+    phase_history: list[str] = field(default_factory=_default_phase_history)
+    revision_cycles: int = 0
+    quality_review_cycles: int = 0
+
+
+@dataclass(slots=True)
 class VersionRecord(JsonDataclassMixin):
     version_id: str = ""
     artifact_kind: str = ""
@@ -350,7 +333,6 @@ class DebugRoundSummary(JsonDataclassMixin):
     result_status: str = ""
     context_block_titles: list[str] = field(default_factory=list)
     truncated_block_titles: list[str] = field(default_factory=list)
-    active_skill_ids: list[str] = field(default_factory=list)
     tool_names: list[str] = field(default_factory=list)
     question_count: int = 0
     outline_status: str = ""
@@ -437,7 +419,6 @@ class WorkspaceState(JsonDataclassMixin):
     session_id: str
     task_brief: str = ""
     directive_ledger: DirectiveLedger = field(default_factory=DirectiveLedger)
-    active_skills: ActiveSkillsState = field(default_factory=ActiveSkillsState)
     material_catalog: MaterialCatalog = field(default_factory=MaterialCatalog)
     retrieved_materials: RetrievedMaterialsState = field(default_factory=RetrievedMaterialsState)
     evidence_board: EvidenceBoard = field(default_factory=EvidenceBoard)
@@ -445,6 +426,8 @@ class WorkspaceState(JsonDataclassMixin):
     draft_artifact: DraftArtifact = field(default_factory=DraftArtifact)
     self_review: SelfReview = field(default_factory=SelfReview)
     revision_history: list[RevisionHistoryEntry] = field(default_factory=list)
+    workflow_state: WorkflowState = field(default_factory=WorkflowState)
+    quality_backlog: QualityBacklog = field(default_factory=QualityBacklog)
     pending_questions: list[dict[str, Any]] = field(default_factory=list)
     session_meta: dict[str, Any] = field(default_factory=_default_session_meta)
     debug_state: WorkspaceDebugState = field(default_factory=WorkspaceDebugState)
@@ -452,16 +435,11 @@ class WorkspaceState(JsonDataclassMixin):
     @classmethod
     def create_empty(cls, session_id: str) -> "WorkspaceState":
         workspace = cls(session_id=session_id)
+        workspace.session_meta = _ensure_session_meta_defaults(workspace.session_meta)
         workspace.session_meta.setdefault("session_id", session_id)
+        workspace.workflow_state = WorkflowState()
+        workspace.quality_backlog = QualityBacklog()
         return workspace
-
-    @property
-    def active_skill_ids(self) -> list[str]:
-        return self.active_skills.resolved_skill_ids()
-
-    @active_skill_ids.setter
-    def active_skill_ids(self, values: list[str]) -> None:
-        self.active_skills = ActiveSkillsState.from_skill_ids(list(values))
 
     @classmethod
     def from_dict(
@@ -474,11 +452,63 @@ class WorkspaceState(JsonDataclassMixin):
             raise TypeError("WorkspaceState.from_dict expects a mapping payload.")
 
         normalized = dict(payload)
-        if "active_skills" not in normalized and "active_skill_ids" in normalized:
-            normalized["active_skills"] = ActiveSkillsState.from_skill_ids(
-                list(normalized.get("active_skill_ids", []))
-            ).to_dict()
         if "revision_history" not in normalized and "revision_intents" in normalized:
             normalized["revision_history"] = list(normalized.get("revision_intents", []) or [])
-
+        normalized["session_meta"] = _ensure_session_meta_defaults(normalized.get("session_meta"))
+        if "quality_backlog" not in normalized or not isinstance(
+            normalized.get("quality_backlog"),
+            Mapping,
+        ):
+            normalized["quality_backlog"] = _build_legacy_quality_backlog(
+                normalized["session_meta"]
+            ).to_dict()
+        if "workflow_state" not in normalized or not isinstance(
+            normalized.get("workflow_state"),
+            Mapping,
+        ):
+            normalized["workflow_state"] = _infer_legacy_workflow_state(normalized).to_dict()
         return JsonDataclassMixin.from_dict.__func__(cls, normalized)
+
+
+def _build_legacy_quality_backlog(session_meta: Mapping[str, Any]) -> QualityBacklog:
+    blockers = [
+        str(item).strip()
+        for item in list(session_meta.get("finalization_blockers", []) or [])
+        if str(item).strip()
+    ][:12]
+    if not blockers:
+        return QualityBacklog()
+
+    return QualityBacklog(
+        items=[
+            QualityBacklogItem(
+                item_id=f"legacy_blocker_{index:03d}",
+                type="blocking_issue",
+                severity="high",
+                description=description,
+                suggested_action="",
+            )
+            for index, description in enumerate(blockers, start=1)
+        ]
+    )
+
+
+def _infer_legacy_workflow_state(payload: Mapping[str, Any]) -> WorkflowState:
+    session_meta = _ensure_session_meta_defaults(payload.get("session_meta"))
+    pending_questions = list(payload.get("pending_questions", []) or [])
+    draft_artifact = DraftArtifact.from_dict(payload.get("draft_artifact", {}))
+
+    current_phase = "intake"
+    if draft_artifact.status == "finalized":
+        current_phase = "completed"
+    elif pending_questions:
+        current_phase = "ask_user"
+
+    return WorkflowState(
+        current_phase=current_phase,
+        next_phase_hint="",
+        last_transition="legacy_session_import",
+        phase_history=[current_phase],
+        revision_cycles=int(session_meta.get("revision_round_count", 0) or 0),
+        quality_review_cycles=len(list(session_meta.get("quality_review_snapshots", []) or [])),
+    )

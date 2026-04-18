@@ -30,8 +30,6 @@ class RoundContextViewModel(JsonDataclassMixin):
     rounds_used: int = 0
     action_taken: str = ""
     action_label: str = ""
-    primary_skill_display: str = ""
-    revision_skill_displays: list[str] = field(default_factory=list)
     review: RoundReviewViewModel = field(default_factory=RoundReviewViewModel)
     artifact_title: str = ""
     artifact_text: str = ""
@@ -62,15 +60,8 @@ class FailedViewModel(RoundContextViewModel):
     llm_raw_output: str = ""
 
 
-@dataclass(slots=True)
-class MaxRoundsExceededViewModel(RoundContextViewModel):
-    status: str = "max_rounds_exceeded"
-    error_message: str = ""
-
-
 ResultViewModel = (
     AskUserViewModel
     | CompletedViewModel
     | FailedViewModel
-    | MaxRoundsExceededViewModel
 )

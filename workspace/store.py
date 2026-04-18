@@ -49,13 +49,9 @@ class WorkspaceStore:
         self,
         workspace: WorkspaceState,
         *,
-        available_skills: list[object] | None = None,
-        active_skills: list[object] | None = None,
         available_tools: list[object] | None = None,
     ) -> WorkspaceSnapshot:
         return build_workspace_snapshot(
             workspace,
-            available_skills=available_skills,
-            active_skills=active_skills,
             available_tools=available_tools,
         )

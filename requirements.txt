@@ -1,5 +1,6 @@
 openai>=2.26.0,<3
 openai-agents>=0.14.1
+litellm>=1.83.7
 pypdf>=5.0.0
 python-docx>=1.1.0
 python-dotenv>=1.0.1

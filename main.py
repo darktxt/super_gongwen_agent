@@ -22,13 +22,6 @@ def build_parser() -> argparse.ArgumentParser:
         dest="user_input",
         help="Run one drafting turn with the given user input.",
     )
-    parser.add_argument(
-        "--max-rounds",
-        dest="max_rounds",
-        type=int,
-        default=16,
-        help="Maximum internal LLM rounds allowed for a single turn.",
-    )
     return parser
 
 
@@ -93,7 +86,6 @@ def main(argv: list[str] | None = None) -> int:
         turn_result = app.run_turn(
             session_id=session_id,
             user_input=args.user_input,
-            max_rounds=args.max_rounds,
         )
 
         while True:
@@ -113,7 +105,6 @@ def main(argv: list[str] | None = None) -> int:
             turn_result = app.run_turn(
                 session_id=session_id,
                 user_input=follow_up_input,
-                max_rounds=args.max_rounds,
             )
 
     result = app.bootstrap(session_id=args.session_id)

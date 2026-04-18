@@ -10,9 +10,11 @@ from .models import (
     EvidenceBoard,
     MaterialCatalog,
     OutlineArtifact,
+    QualityBacklog,
     RetrievedMaterialsState,
     RevisionHistoryEntry,
     SelfReview,
+    WorkflowState,
     WorkspaceState,
 )
 
@@ -23,9 +25,13 @@ class WorkspaceSnapshot(JsonDataclassMixin):
     task_brief: str = ""
     recent_user_messages: list[dict[str, Any]] = field(default_factory=list)
     recent_brain_trace: list[dict[str, Any]] = field(default_factory=list)
+    runtime_workflow: str = ""
+    provider_profile: dict[str, Any] = field(default_factory=dict)
+    quality_review_snapshots: list[dict[str, Any]] = field(default_factory=list)
+    finalization_blockers: list[str] = field(default_factory=list)
+    workflow_state: WorkflowState = field(default_factory=WorkflowState)
+    quality_backlog: QualityBacklog = field(default_factory=QualityBacklog)
     directive_ledger: DirectiveLedger = field(default_factory=DirectiveLedger)
-    active_skills: list[dict[str, Any]] = field(default_factory=list)
-    available_skills: list[dict[str, Any]] = field(default_factory=list)
     material_catalog: MaterialCatalog = field(default_factory=MaterialCatalog)
     retrieved_materials: RetrievedMaterialsState = field(default_factory=RetrievedMaterialsState)
     evidence_board: EvidenceBoard = field(default_factory=EvidenceBoard)
@@ -40,8 +46,6 @@ class WorkspaceSnapshot(JsonDataclassMixin):
 def build_workspace_snapshot(
     workspace: WorkspaceState,
     *,
-    available_skills: list[Any] | None = None,
-    active_skills: list[Any] | None = None,
     available_tools: list[Any] | None = None,
 ) -> WorkspaceSnapshot:
     latest_user_message = str(workspace.session_meta.get("latest_user_message", ""))
@@ -57,31 +61,26 @@ def build_workspace_snapshot(
         round_summary.to_dict()
         for round_summary in list(workspace.debug_state.recent_rounds or [])[-4:]
     ]
-    resolved_active_skills = (
-        _serialize_entries(active_skills)
-        if active_skills is not None
-        else [
-            {
-                "skill_id": skill_id,
-                "skill_kind": (
-                    "primary"
-                    if skill_id.startswith("primary.")
-                    else "revision"
-                    if skill_id.startswith("revision.")
-                    else ""
-                ),
-            }
-            for skill_id in workspace.active_skill_ids
-        ]
-    )
     return WorkspaceSnapshot(
         latest_user_message=latest_user_message,
         task_brief=workspace.task_brief,
         recent_user_messages=recent_user_messages,
         recent_brain_trace=recent_brain_trace,
+        runtime_workflow=str(workspace.session_meta.get("runtime_workflow", "") or ""),
+        provider_profile=dict(workspace.session_meta.get("provider_profile", {}) or {}),
+        quality_review_snapshots=[
+            dict(item)
+            for item in list(workspace.session_meta.get("quality_review_snapshots", []) or [])[-4:]
+            if isinstance(item, dict)
+        ],
+        finalization_blockers=[
+            str(item).strip()
+            for item in list(workspace.session_meta.get("finalization_blockers", []) or [])
+            if str(item).strip()
+        ][:8],
+        workflow_state=WorkflowState.from_dict(workspace.workflow_state),
+        quality_backlog=QualityBacklog.from_dict(workspace.quality_backlog),
         directive_ledger=DirectiveLedger.from_dict(workspace.directive_ledger),
-        active_skills=resolved_active_skills,
-        available_skills=_serialize_entries(available_skills),
         material_catalog=MaterialCatalog.from_dict(workspace.material_catalog),
         retrieved_materials=RetrievedMaterialsState.from_dict(workspace.retrieved_materials),
         evidence_board=EvidenceBoard.from_dict(workspace.evidence_board),

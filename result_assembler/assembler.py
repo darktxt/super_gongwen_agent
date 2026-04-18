@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from skill_system.catalog import SkillCatalog
 from .view_models import (
     AskUserViewModel,
     CompletedViewModel,
     FailedViewModel,
-    MaxRoundsExceededViewModel,
     RoundContextViewModel,
     RoundReviewViewModel,
     ResultViewModel,
@@ -16,7 +14,6 @@ from .view_models import (
 
 class ResultAssembler:
     ACTION_LABELS = {
-        "load_skill": "加载写作类型",
         "build_outline": "生成提纲",
         "write_draft": "整稿起草",
         "write_section": "补写章节",
@@ -25,9 +22,6 @@ class ResultAssembler:
         "ask_user": "补充信息",
         "finalize": "生成终稿",
     }
-
-    def __init__(self, skill_catalog: SkillCatalog | None = None) -> None:
-        self.skill_catalog = skill_catalog or self._load_skill_catalog()
 
     def assemble(self, turn_result: object) -> ResultViewModel:
         status = str(getattr(turn_result, "status", "") or "")
@@ -44,8 +38,6 @@ class ResultAssembler:
                 rounds_used=round_context.rounds_used,
                 action_taken=round_context.action_taken,
                 action_label=round_context.action_label,
-                primary_skill_display=round_context.primary_skill_display,
-                revision_skill_displays=list(round_context.revision_skill_displays),
                 review=round_context.review,
                 artifact_title=round_context.artifact_title,
                 artifact_text=round_context.artifact_text,
@@ -63,8 +55,6 @@ class ResultAssembler:
                 rounds_used=round_context.rounds_used,
                 action_taken=round_context.action_taken,
                 action_label=round_context.action_label,
-                primary_skill_display=round_context.primary_skill_display,
-                revision_skill_displays=list(round_context.revision_skill_displays),
                 review=round_context.review,
                 artifact_title=round_context.artifact_title,
                 artifact_text=round_context.artifact_text,
@@ -76,31 +66,11 @@ class ResultAssembler:
                 message="为继续写作，请补充以下信息：",
             )
 
-        if status == "max_rounds_exceeded":
-            return MaxRoundsExceededViewModel(
-                session_id=round_context.session_id,
-                rounds_used=round_context.rounds_used,
-                action_taken=round_context.action_taken,
-                action_label=round_context.action_label,
-                primary_skill_display=round_context.primary_skill_display,
-                revision_skill_displays=list(round_context.revision_skill_displays),
-                review=round_context.review,
-                artifact_title=round_context.artifact_title,
-                artifact_text=round_context.artifact_text,
-                material_actions=list(round_context.material_actions),
-                material_names=list(round_context.material_names),
-                next_step_hint=round_context.next_step_hint,
-                error_message=error_message,
-                message="本轮暂未完成。",
-            )
-
         return FailedViewModel(
             session_id=round_context.session_id,
             rounds_used=round_context.rounds_used,
             action_taken=round_context.action_taken,
             action_label=round_context.action_label,
-            primary_skill_display=round_context.primary_skill_display,
-            revision_skill_displays=list(round_context.revision_skill_displays),
             review=round_context.review,
             artifact_title=round_context.artifact_title,
             artifact_text=round_context.artifact_text,
@@ -142,18 +112,6 @@ class ResultAssembler:
                 lines.append(view_model.next_step_hint)
             return "\n".join(lines)
 
-        if isinstance(view_model, MaxRoundsExceededViewModel):
-            lines.append(view_model.message)
-            lines.append(
-                "说明："
-                + (view_model.error_message or "请收敛要求，或补充更明确的写作重点后继续。")
-            )
-            if view_model.next_step_hint:
-                lines.append("")
-                lines.append("下一步")
-                lines.append(view_model.next_step_hint)
-            return "\n".join(lines)
-
         lines.append(view_model.message)
         lines.append(
             "说明："
@@ -179,21 +137,6 @@ class ResultAssembler:
         rounds_used = int(getattr(turn_result, "rounds_used", 0) or 0)
         workspace = getattr(turn_result, "workspace", None)
         step = getattr(turn_result, "step", None)
-        active_skills = getattr(workspace, "active_skills", None)
-        primary_skill_id = str(
-            getattr(active_skills, "primary_skill_id", "")
-            if active_skills is not None
-            else ""
-        ).strip()
-        revision_skill_ids = [
-            str(skill_id).strip()
-            for skill_id in list(
-                getattr(active_skills, "revision_skill_ids", [])
-                if active_skills is not None
-                else []
-            )
-            if str(skill_id).strip()
-        ]
 
         action_taken = str(getattr(step, "action_taken", "") or "").strip()
         action_label = self.ACTION_LABELS.get(action_taken, action_taken)
@@ -207,10 +150,6 @@ class ResultAssembler:
             rounds_used=rounds_used,
             action_taken=action_taken,
             action_label=action_label,
-            primary_skill_display=self._format_skill_display(primary_skill_id),
-            revision_skill_displays=[
-                self._format_skill_display(skill_id) for skill_id in revision_skill_ids
-            ],
             review=review,
             artifact_title=artifact_title,
             artifact_text=artifact_text,
@@ -274,8 +213,6 @@ class ResultAssembler:
             final_text = str(getattr(payload, "final_text", "") or "").strip()
             if final_text:
                 return "终稿正文", final_text
-        if action_taken == "load_skill":
-            return "本轮结果", "已加载当前公文写作类型，准备进入材料整理或起草阶段。"
         return "", ""
 
     def _build_material_readout(
@@ -324,10 +261,6 @@ class ResultAssembler:
                 lines.append(f"动作：{view_model.action_taken}（{view_model.action_label}）")
             else:
                 lines.append(f"动作：{view_model.action_taken}")
-        if view_model.primary_skill_display:
-            lines.append(f"主写作 skill：{view_model.primary_skill_display}")
-        if view_model.revision_skill_displays:
-            lines.append("修订 skill：" + "、".join(view_model.revision_skill_displays))
 
         if view_model.review.has_content:
             lines.append("")
@@ -368,28 +301,9 @@ class ResultAssembler:
             return "你可以继续输入修改意见，进一步补写或润色当前稿件。"
         if status == "needs_user_input":
             return "可直接补充材料、说明要求，或指出要保留/调整的结构。"
-        if status in {"failed", "max_rounds_exceeded"}:
+        if status == "failed":
             return "建议补充更明确的文种、用途、重点要求，或分步继续修改。"
-        if action_taken == "load_skill":
-            return "可继续读取材料，或直接进入提纲和正文生成。"
         return ""
-
-    def _load_skill_catalog(self) -> SkillCatalog | None:
-        try:
-            return SkillCatalog.from_loader()
-        except Exception:
-            return None
-
-    def _format_skill_display(self, skill_id: str) -> str:
-        normalized = str(skill_id or "").strip()
-        if not normalized:
-            return ""
-        if self.skill_catalog is None or not self.skill_catalog.has_skill(normalized):
-            return normalized
-        spec = self.skill_catalog.get_spec(normalized)
-        if spec.name and spec.name != normalized:
-            return f"{spec.name}（{normalized}）"
-        return normalized
 
     def _format_tool_request(self, tool_name: str, arguments: dict[str, object]) -> str:
         if tool_name == "search":

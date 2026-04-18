@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
-import shlex
 import shutil
 import subprocess
 from typing import Any, Iterable
@@ -12,11 +11,6 @@ from uuid import uuid4
 
 from agents import (
     RunContextWrapper,
-    ShellCallOutcome,
-    ShellCommandOutput,
-    ShellCommandRequest,
-    ShellResult,
-    ShellTool,
     function_tool,
 )
 
@@ -65,14 +59,6 @@ MATERIAL_TOOL_SPECS: tuple[dict[str, Any], ...] = (
         "max_result_chars": 4000,
     },
 )
-NATIVE_SHELL_TOOL_SPEC = {
-    "name": "shell",
-    "mode": "native_shell",
-    "is_read_only": True,
-    "is_concurrency_safe": True,
-    "requires_user_interaction": False,
-    "max_result_chars": 4000,
-}
 MATERIAL_TOOL_NAMES = tuple(spec["name"] for spec in MATERIAL_TOOL_SPECS)
 _MATERIAL_TOOL_SPEC_INDEX = {spec["name"]: spec for spec in MATERIAL_TOOL_SPECS}
 
@@ -82,14 +68,11 @@ class AgentsToolRuntimeContext:
     working_root: Path
     session_id: str | None = None
     app_home: Path | None = None
-    native_shell_enabled: bool = False
     tool_requests: list[dict[str, Any]] = field(default_factory=list)
     tool_results: list[dict[str, Any]] = field(default_factory=list)
 
 
-def list_material_tool_specs(*, native_shell: bool = False) -> list[dict[str, Any]]:
-    if native_shell:
-        return [dict(NATIVE_SHELL_TOOL_SPEC)] + [dict(spec) for spec in MATERIAL_TOOL_SPECS]
+def list_material_tool_specs() -> list[dict[str, Any]]:
     return [dict(spec) for spec in MATERIAL_TOOL_SPECS]
 
 
@@ -633,314 +616,6 @@ def _execute_tool(
     )
 
 
-def _split_shell_command(command: str) -> list[str]:
-    try:
-        tokens = shlex.split(command, posix=False)
-    except ValueError:
-        tokens = command.split()
-    normalized: list[str] = []
-    for token in tokens:
-        text = str(token).strip()
-        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
-            text = text[1:-1]
-        if text:
-            normalized.append(text)
-    return normalized
-
-
-def _extract_literal_path_from_command(command: str) -> str:
-    match = re.search(r"-LiteralPath\s+(['\"])(.+?)\1", command, flags=re.IGNORECASE)
-    return str(match.group(2) if match else "").strip()
-
-
-def _extract_select_object_value(command: str, flag: str) -> int | None:
-    match = re.search(rf"{flag}\s+(\d+)", command, flags=re.IGNORECASE)
-    if not match:
-        return None
-    return int(match.group(1))
-
-
-def _extract_rg_request(command: str) -> tuple[str, list[str], bool, bool] | None:
-    tokens = _split_shell_command(command)
-    if not tokens or tokens[0].lower() != "rg":
-        return None
-
-    pattern = ""
-    targets: list[str] = []
-    case_sensitive = True
-    fixed_strings = False
-    positional_started = False
-    for token in tokens[1:]:
-        lowered = token.lower()
-        if not positional_started and lowered.startswith("-"):
-            if lowered in {"-i", "--ignore-case"}:
-                case_sensitive = False
-            if lowered in {"-f", "--fixed-strings"}:
-                fixed_strings = True
-            continue
-        positional_started = True
-        if not pattern:
-            pattern = token
-            continue
-        targets.append(token)
-    return pattern, targets, case_sensitive, fixed_strings
-
-
-def _is_allowed_material_shell_command(command: str, *, working_root: Path) -> bool:
-    stripped = str(command or "").strip()
-    if not stripped:
-        return False
-
-    if stripped.lower().startswith("rg "):
-        parsed = _extract_rg_request(stripped)
-        if parsed is None:
-            return False
-        pattern, targets, _, _ = parsed
-        if "--files" in stripped.lower():
-            targets = ([pattern] if pattern else []) + list(targets)
-        if not targets:
-            return False
-        for target in targets:
-            try:
-                resolve_material_path(target, working_root=working_root)
-                continue
-            except Exception:
-                resolved_roots = list(resolve_material_roots([target], working_root=working_root))
-                if not resolved_roots:
-                    return False
-        return True
-
-    if "get-content" in stripped.lower() and "-literalpath" in stripped.lower():
-        path_value = _extract_literal_path_from_command(stripped)
-        if not path_value:
-            return False
-        try:
-            resolve_material_path(path_value, working_root=working_root)
-            return True
-        except Exception:
-            return False
-
-    return False
-
-
-def _record_shell_derived_material_result(
-    runtime_context: AgentsToolRuntimeContext,
-    *,
-    command: str,
-    stdout: str,
-    request_id: str,
-) -> None:
-    stripped = str(command or "").strip()
-    if not stripped:
-        return
-
-    if stripped.lower().startswith("rg "):
-        parsed = _extract_rg_request(stripped)
-        if parsed is None:
-            return
-        pattern, targets, case_sensitive, fixed_strings = parsed
-        if "--files" in stripped.lower():
-            runtime_context.tool_requests.append(
-                {
-                    "tool_name": "list",
-                    "arguments": {"roots": [MATERIALS_DIR_NAME]},
-                    "request_id": request_id,
-                }
-            )
-            items: list[dict[str, Any]] = []
-            for raw_line in stdout.splitlines():
-                candidate = Path(raw_line.strip()).expanduser()
-                if not candidate.is_absolute():
-                    candidate = (runtime_context.working_root / candidate).resolve()
-                else:
-                    candidate = candidate.resolve()
-                if candidate.is_file() and candidate.suffix.lower() in {".pdf", ".docx", ".md", ".txt", ".json"}:
-                    items.append(_build_search_hit(candidate, discovered_by="list"))
-            _finalize_tool_result(
-                runtime_context,
-                tool_name="list",
-                request_id=request_id,
-                summary=f"Listed {len(items)} files.",
-                payload={
-                    "items": items,
-                    "selected_files": [],
-                    "roots": [MATERIALS_DIR_NAME],
-                },
-            )
-            return
-
-        if "--json" in stripped.lower():
-            matches: list[dict[str, Any]] = []
-            for raw_line in stdout.splitlines():
-                try:
-                    payload = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    continue
-                if payload.get("type") != "match":
-                    continue
-                data = payload.get("data", {})
-                path_text = str(data.get("path", {}).get("text", "") or "").strip()
-                line_text = str(data.get("lines", {}).get("text", "") or "").strip()
-                line_no = int(data.get("line_number", 0) or 0)
-                if not path_text or not line_text:
-                    continue
-                matches.append(
-                    {
-                        "path": path_text,
-                        "line_no": line_no,
-                        "line_text": line_text,
-                    }
-                )
-            runtime_context.tool_requests.append(
-                {
-                    "tool_name": "grep",
-                    "arguments": {
-                        "pattern": pattern,
-                        "paths": targets,
-                        "case_sensitive": case_sensitive,
-                    },
-                    "request_id": request_id,
-                }
-            )
-            selected_files: list[str] = []
-            for match in matches:
-                path = str(match.get("path", "") or "").strip()
-                if path and path not in selected_files:
-                    selected_files.append(path)
-            _finalize_tool_result(
-                runtime_context,
-                tool_name="grep",
-                request_id=request_id,
-                summary=f"Grep matched {len(matches)} lines for pattern '{pattern}'.",
-                payload={
-                    "pattern": pattern,
-                    "matches": matches,
-                    "selected_files": selected_files,
-                },
-            )
-            return
-
-        if fixed_strings and pattern:
-            runtime_context.tool_requests.append(
-                {
-                    "tool_name": "search",
-                    "arguments": {"query": pattern, "roots": [MATERIALS_DIR_NAME]},
-                    "request_id": request_id,
-                }
-            )
-            items = _search_materials_via_shell(
-                pattern,
-                roots=[MATERIALS_DIR_NAME],
-                working_root=runtime_context.working_root,
-                limit=20,
-            )
-            _finalize_tool_result(
-                runtime_context,
-                tool_name="search",
-                request_id=request_id,
-                summary=f"Found {len(items)} candidate files for query '{pattern}'.",
-                payload={
-                    "query": pattern,
-                    "items": items,
-                    "selected_files": [item["path"] for item in items[: min(len(items), 5)]],
-                },
-            )
-            return
-
-    if "get-content" in stripped.lower() and "-literalpath" in stripped.lower():
-        path_value = _extract_literal_path_from_command(stripped)
-        if not path_value:
-            return
-        skip = _extract_select_object_value(stripped, r"-Skip")
-        first = _extract_select_object_value(stripped, r"-First")
-        arguments: dict[str, Any] = {"path": path_value}
-        start_line = (skip or 0) + 1 if skip is not None else None
-        end_line = None
-        if start_line is not None and first is not None and first > 0:
-            end_line = start_line + first - 1
-            arguments["start_line"] = start_line
-            arguments["end_line"] = end_line
-        runtime_context.tool_requests.append(
-            {
-                "tool_name": "read",
-                "arguments": arguments,
-                "request_id": request_id,
-            }
-        )
-        text = stdout.rstrip("\r\n")
-        path = resolve_material_path(path_value, working_root=runtime_context.working_root)
-        _finalize_tool_result(
-            runtime_context,
-            tool_name="read",
-            request_id=request_id,
-            summary=f"Read {path}.",
-            payload={
-                "path": str(path),
-                "text": text,
-                "start_line": start_line or (1 if text else 0),
-                "end_line": end_line or len(text.splitlines()),
-                "preview": _build_preview(text),
-                "selected_files": [str(path)],
-            },
-        )
-
-
-def _execute_shell_command_batch(request: ShellCommandRequest) -> ShellResult:
-    runtime_context = request.ctx_wrapper.context
-    commands = [
-        str(command).strip()
-        for command in list(request.data.action.commands or [])
-        if str(command).strip()
-    ]
-    timeout_ms = int(request.data.action.timeout_ms or DEFAULT_SHELL_TIMEOUT_MS)
-    outputs: list[ShellCommandOutput] = []
-
-    for index, command in enumerate(commands, start=1):
-        if not _is_allowed_material_shell_command(command, working_root=runtime_context.working_root):
-            outputs.append(
-                ShellCommandOutput(
-                    stdout="",
-                    stderr=(
-                        "Only read-only materials commands are allowed. "
-                        "Use rg --files materials, rg --json ... materials, or "
-                        "Get-Content -LiteralPath <materials path>."
-                    ),
-                    outcome=ShellCallOutcome(type="exit", exit_code=1),
-                    command=command,
-                )
-            )
-            continue
-
-        stdout, stderr, exit_code, timed_out = _run_powershell(
-            command,
-            cwd=runtime_context.working_root,
-            timeout_ms=timeout_ms,
-        )
-        outputs.append(
-            ShellCommandOutput(
-                stdout=stdout,
-                stderr=stderr,
-                outcome=ShellCallOutcome(
-                    type="timeout" if timed_out else "exit",
-                    exit_code=None if timed_out else exit_code,
-                ),
-                command=command,
-            )
-        )
-        if not timed_out and (exit_code or 0) == 0:
-            _record_shell_derived_material_result(
-                runtime_context,
-                command=command,
-                stdout=stdout,
-                request_id=f"{request.data.call_id}_{index}",
-            )
-
-    return ShellResult(
-        output=outputs,
-        max_output_length=request.data.action.max_output_length,
-    )
-
-
 @function_tool(name_override="search")
 def search_materials(
     ctx: RunContextWrapper[AgentsToolRuntimeContext],
@@ -1016,7 +691,3 @@ def build_material_function_tools() -> list[Any]:
         read_material,
         grep_materials,
     ]
-
-
-def build_material_native_shell_tools() -> list[Any]:
-    return [ShellTool(executor=_execute_shell_command_batch, name="shell", environment={"type": "local"})]
