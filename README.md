@@ -44,10 +44,7 @@ SUPER_GONGWEN_HOME=
 
 说明：
 
-- `LITELLM_MODEL` 必填，例如 `minimax/abab6.5-chat`、`zhipuai/glm-4.5`、`openai/gpt-4.1`
-- `LITELLM_API_KEY`、`LITELLM_BASE_URL` 按所选 provider 需要填写
-- `OPENAI_BASE_URL` 已不再读取；接入 MiniMax、GLM、OpenAI 等模型都统一走 LiteLLM
-- `OPENAI_API_KEY`、`OPENAI_MODEL` 仅保留兼容读取，不再作为主配置项
+- `LITELLM_MODEL`、 `LITELLM_API_KEY`、`LITELLM_BASE_URL` 按所选 provider 需要填写
 - `OPENAI_AGENTS_OUTPUT_MODE` 目前仅作兼容读取；运行时已统一收敛到文本 JSON 协议
 - `SUPER_GONGWEN_HOME` 用于指定运行态目录，默认是当前目录下的 `.super_gongwen/`
 
