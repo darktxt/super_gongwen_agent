@@ -5,7 +5,7 @@ from pathlib import Path
 
 from session_storage.history import initialize_session_storage
 from session_storage.paths import get_workspace_path
-from utils.clock import utc_now_iso
+from .common import utc_now_iso
 from .models import WorkspaceState
 from .snapshot import WorkspaceSnapshot, build_workspace_snapshot
 

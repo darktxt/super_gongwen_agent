@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import fields, is_dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from types import UnionType
@@ -10,14 +11,13 @@ from typing import Any, Mapping, TypeVar, Union, get_args, get_origin, get_type_
 T = TypeVar("T", bound="JsonDataclassMixin")
 
 
-class JsonDataclassMixin:
-    """Mixin that provides predictable dict/JSON conversion for dataclasses."""
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
+
+class JsonDataclassMixin:
     def to_dict(self) -> dict[str, Any]:
-        return {
-            field.name: _serialize_value(getattr(self, field.name))
-            for field in fields(self)
-        }
+        return {field.name: _serialize_value(getattr(self, field.name)) for field in fields(self)}
 
     @classmethod
     def from_dict(cls: type[T], payload: Mapping[str, Any] | T) -> T:
@@ -32,10 +32,7 @@ def _serialize_value(value: Any) -> Any:
     if isinstance(value, JsonDataclassMixin):
         return value.to_dict()
     if is_dataclass(value):
-        return {
-            field.name: _serialize_value(getattr(value, field.name))
-            for field in fields(value)
-        }
+        return {field.name: _serialize_value(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
@@ -53,35 +50,24 @@ def _field_hints(cls: type[Any]) -> dict[str, Any]:
 def _deserialize_dataclass(cls: type[T], payload: Mapping[str, Any]) -> T:
     hints = _field_hints(cls)
     kwargs: dict[str, Any] = {}
-
     for field in fields(cls):
         if field.name not in payload:
             continue
-        expected_type = hints.get(field.name, Any)
-        kwargs[field.name] = _deserialize_value(expected_type, payload[field.name])
-
+        kwargs[field.name] = _deserialize_value(hints.get(field.name, Any), payload[field.name])
     return cls(**kwargs)
 
 
 def _deserialize_value(expected_type: Any, value: Any) -> Any:
-    if value is None:
-        return None
-
-    if expected_type is Any:
+    if value is None or expected_type is Any:
         return value
-
     origin = get_origin(expected_type)
     args = get_args(expected_type)
-
     if origin is None:
         if expected_type is Path:
             return Path(value)
-        if isinstance(expected_type, type) and issubclass(
-            expected_type, JsonDataclassMixin
-        ):
+        if isinstance(expected_type, type) and issubclass(expected_type, JsonDataclassMixin):
             return expected_type.from_dict(value)
         return value
-
     if origin in (list, tuple, set):
         item_type = args[0] if args else Any
         items = [_deserialize_value(item_type, item) for item in value]
@@ -90,7 +76,6 @@ def _deserialize_value(expected_type: Any, value: Any) -> Any:
         if origin is set:
             return set(items)
         return items
-
     if origin is dict:
         key_type = args[0] if len(args) > 0 else Any
         value_type = args[1] if len(args) > 1 else Any
@@ -98,11 +83,7 @@ def _deserialize_value(expected_type: Any, value: Any) -> Any:
             _deserialize_value(key_type, key): _deserialize_value(value_type, item)
             for key, item in value.items()
         }
-
     if origin in (Union, UnionType):
         non_none_args = [arg for arg in args if arg is not type(None)]
-        if not non_none_args:
-            return value
-        return _deserialize_value(non_none_args[0], value)
-
+        return _deserialize_value(non_none_args[0], value) if non_none_args else value
     return value

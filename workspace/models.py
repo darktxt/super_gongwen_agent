@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from utils.clock import utc_now_iso
-from utils.serialization import JsonDataclassMixin
+from .common import JsonDataclassMixin, utc_now_iso
 
 
 def _default_session_meta() -> dict[str, Any]:
@@ -347,6 +346,7 @@ class DebugRoundSummary(JsonDataclassMixin):
     patch_digest: str = ""
     decision_trace_summary: list[str] = field(default_factory=list)
     orchestration_summary: dict[str, Any] = field(default_factory=dict)
+    agent_roles_summary: dict[str, Any] = field(default_factory=dict)
     llm_request_chars: int = 0
     llm_response_chars: int = 0
     llm_response_preview: str = ""

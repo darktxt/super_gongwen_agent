@@ -6,7 +6,7 @@ import re
 from typing import Any, Iterable
 from uuid import uuid4
 
-from utils.clock import utc_now_iso
+from .common import utc_now_iso
 from .models import (
     MaterialItem,
     MaterialExcerpt,

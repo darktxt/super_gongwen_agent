@@ -1,119 +1,54 @@
 from __future__ import annotations
-
 import argparse
-import sys
-
 from app import create_app
 from config import load_config
-from result_assembler.assembler import ResultAssembler
-from utils.session_ids import generate_session_id
-
-
+from session_storage.paths import build_session_paths
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bootstrap or run super-gongwen-agent.")
     parser.add_argument("--session-id", dest="session_id", help="Optional session id to initialize.")
-    parser.add_argument(
-        "--base-dir",
-        dest="base_dir",
-        help="Base directory used to resolve .super_gongwen when SUPER_GONGWEN_HOME is not set.",
-    )
-    parser.add_argument(
-        "--user-input",
-        dest="user_input",
-        help="Run one drafting turn with the given user input.",
-    )
+    parser.add_argument("--base-dir", dest="base_dir", help="Base directory for .super_gongwen.")
+    parser.add_argument("--user-input", dest="user_input", help="Run one drafting turn with the given user input.")
     return parser
-
-
-def _read_follow_up_input(status: str) -> str | None:
-    if status == "completed":
-        print("")
-        print("已进入终稿后交互模式。")
-        print("请输入修改意见或重写要求。单独输入 /end 提交，输入 /exit 结束。")
-    else:
-        print("")
-        print("已进入补充信息交互模式。")
-        print("请输入补充材料或说明。单独输入 /end 提交，输入 /exit 结束。")
-
-    lines: list[str] = []
-    while True:
-        try:
-            line = input("> ")
-        except EOFError:
-            print("")
-            return None
-
-        normalized = line.strip()
-        if normalized == "/exit":
-            return None
-        if normalized == "/end":
-            if lines:
-                return "\n".join(lines).strip()
-            print("请至少输入一行内容，或输入 /exit 结束。")
-            continue
-        lines.append(line)
-
-
-def _should_enter_interactive_loop() -> bool:
-    return bool(sys.stdin.isatty() and sys.stdout.isatty())
-
-
 def _emit_progress(message: str) -> None:
     print(message, flush=True)
-
-
-def _emit_round_progress(assembler: ResultAssembler, turn_result: object) -> None:
-    rendered = assembler.render_round_progress(turn_result)
-    if rendered.strip():
-        print("")
-        print(rendered, flush=True)
-
-
+def _render_turn(turn_result: object) -> str:
+    lines: list[str] = []
+    response_text = getattr(turn_result, "response_text", "")
+    final_text = getattr(turn_result, "final_text", "")
+    question_pack = getattr(turn_result, "question_pack", [])
+    assumptions = getattr(turn_result, "assumptions", [])
+    major_risks = getattr(turn_result, "major_risks", [])
+    final_output_path = getattr(turn_result, "final_output_path", "")
+    if response_text:
+        lines.append(response_text)
+    if assumptions:
+        lines.append("假设：")
+        lines.extend(f"- {item}" for item in assumptions)
+    if major_risks:
+        lines.append("主要风险：")
+        lines.extend(f"- {item}" for item in major_risks)
+    if question_pack:
+        lines.append("需要你补充的信息：")
+        lines.extend(f"- {item.get('question', '')}" for item in question_pack if item.get("question"))
+    if final_text:
+        lines.append("正文：")
+        lines.append(final_text)
+    if final_output_path:
+        lines.append(f"已写出：{final_output_path}")
+    return "\n".join(line for line in lines if line).strip()
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    assembler = ResultAssembler()
-
-    app = create_app(
-        config=load_config(base_dir=args.base_dir),
-        progress_reporter=_emit_progress if args.user_input else None,
-        round_reporter=(lambda turn_result: _emit_round_progress(assembler, turn_result))
-        if args.user_input
-        else None,
-    )
+    args = build_parser().parse_args(argv)
+    app = create_app(config=load_config(base_dir=args.base_dir), progress_reporter=_emit_progress if args.user_input else None)
     if args.user_input:
-        session_id = args.session_id or generate_session_id()
-        turn_result = app.run_turn(
-            session_id=session_id,
-            user_input=args.user_input,
-        )
-
-        while True:
-            view_model = assembler.assemble(turn_result)
-            print(assembler.render_text(view_model))
-
-            if turn_result.status not in {"completed", "needs_user_input"}:
-                return 1
-
-            if not _should_enter_interactive_loop():
-                return 0
-
-            follow_up_input = _read_follow_up_input(turn_result.status)
-            if not follow_up_input:
-                return 0
-
-            turn_result = app.run_turn(
-                session_id=session_id,
-                user_input=follow_up_input,
-            )
-
+        session_id = args.session_id or app.bootstrap().session_id
+        assert session_id is not None
+        print(_render_turn(app.run_turn(session_id=session_id, user_input=args.user_input)))
+        return 0
     result = app.bootstrap(session_id=args.session_id)
     print("会话已初始化。")
     if result.session_id:
         print(f"会话ID：{result.session_id}")
-        print("可使用该会话ID继续发起或续写公文。")
+        print(f"工作区：{build_session_paths(result.session_id, app_home=result.app_home).workspace_path}")
     return 0
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

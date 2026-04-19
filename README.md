@@ -1,25 +1,28 @@
 # super-gongwen-agent
 
-一个面向中文公文写作的多轮 Agent 工程。当前运行时已经收敛为单一路径：
+一个面向中文公文写作的最小多轮 Agent 运行时。
 
-- 用 OpenAI Agents SDK 负责 agent 编排
-- 用 LiteLLM 统一接入底层模型
-- 用 `workspace/` 保存写作状态与中间产物
+当前版本只保留三件核心资产：
 
-项目目标不是“给一个 prompt 直接吐整稿”，而是让补材、提纲、起草、修订、追问、定稿都成为可追踪、可回放、可继续迭代的工程链路。
+- `workspace/`：写作过程事实源
+- `materials/`：本地材料安全边界
+- LiteLLM + OpenAI Agents SDK：最小运行时内核
 
-## 当前架构
+不再保留旧的 GUI、DOCX 导出、复杂观测层、手写 JSON 修复链和多层运行时胶水。
 
-- `app.py`：应用编排入口，负责单轮回合执行、状态回写与终稿导出
-- `agents_runtime/`：Agents SDK 运行时、上下文编译、动作协议、材料工具与结果落盘
-- `workspace/`：工作区事实源，保存提纲、草稿、证据、修订历史、质量快照
-- `session_storage/`、`observability/`：会话目录、事件流、调试文件与产物保存
+## 当前结构
 
-更完整的设计说明见 [arch.md](./arch.md)。
+- `runtime_core.py`：coordinator、review specialist、结构化输出、`function_tool`、`agent.as_tool()`
+- `app.py`：最小应用壳层，负责 `workspace` 读写、调用 runtime、保存结果
+- `main.py`：最小 CLI
+- `workspace/`：保留原有工作区结构
+- `session_storage/`：最小会话目录与输出落盘
+- `materials/`：模型可读取的本地材料边界
 
-## 环境要求
+## 运行要求
 
 - Python 3.11+
+- LiteLLM 可用模型配置
 
 安装依赖：
 
@@ -29,26 +32,23 @@ pip install -r requirements.txt
 
 ## 配置
 
-项目通过环境变量读取模型配置，推荐使用根目录 `.env`。
+优先读取根目录或 `--base-dir` 下的 `.env`：
 
 ```bash
 LITELLM_MODEL=
 LITELLM_API_KEY=
 LITELLM_BASE_URL=
-LITELLM_TIMEOUT=300
 LITELLM_TEMPERATURE=
 OPENAI_AGENTS_ENABLE_TRACING=1
-OPENAI_AGENTS_OUTPUT_MODE=auto
 SUPER_GONGWEN_HOME=
 ```
 
 说明：
 
-- `LITELLM_MODEL`、 `LITELLM_API_KEY`、`LITELLM_BASE_URL` 按所选 provider 需要填写
-- `OPENAI_AGENTS_OUTPUT_MODE` 目前仅作兼容读取；运行时已统一收敛到文本 JSON 协议
-- `SUPER_GONGWEN_HOME` 用于指定运行态目录，默认是当前目录下的 `.super_gongwen/`
+- 当前只支持 LiteLLM 路径。
+- `SUPER_GONGWEN_HOME` 不配置时，默认使用 `<base-dir>/.super_gongwen/`。
 
-## 运行方式
+## 用法
 
 初始化会话：
 
@@ -59,24 +59,37 @@ python main.py --base-dir .
 直接发起一轮写作：
 
 ```bash
-python main.py --base-dir . --user-input "请根据 materials 中的材料起草一篇关于春季安全生产检查工作的部署讲话稿"
+python main.py --base-dir . --user-input "请根据 materials 中的材料起草一篇部署讲话稿"
 ```
 
 继续同一会话：
 
 ```bash
-python main.py --base-dir . --session-id <已有会话ID> --user-input "补充强调责任传导和隐患闭环整改"
+python main.py --base-dir . --session-id <会话ID> --user-input "补充强调责任闭环和时间节点"
 ```
 
-启动本地 GUI：
+## 当前运行时
 
-```bash
-python gui_main.py
-```
+运行时主链只有一条：
 
-## materials 目录
+1. 读取 `workspace.json`
+2. 写入本轮用户输入
+3. coordinator 通过 Agents SDK 运行
+4. 按需调用本地 `function_tool`
+5. 按需调用 `review_draft` tool-agent
+6. 直接返回结构化结果
+7. 应用层写回 `workspace` 并在需要时导出 `final.md`
 
-运行时默认只允许读取仓库根目录 `materials/` 内的材料，支持：
+## Tools
+
+当前仅提供 4 个受控材料工具：
+
+- `list_materials`
+- `search_materials`
+- `read_material`
+- `grep_materials`
+
+这些工具只能访问 `materials/` 内的：
 
 - `.txt`
 - `.md`
@@ -84,79 +97,31 @@ python gui_main.py
 - `.docx`
 - `.pdf`
 
-相对路径会被解释为 `materials/` 下的路径，越界访问会被阻止。这是当前工具层最重要的安全边界。
+越界路径会被拒绝。
 
-## 运行链路
+## Review
 
-一次 `run_turn()` 的核心流程是：
+review 不再由 Python 事后补跑，而是：
 
-1. 读取 `workspace.json` 并写入本轮用户输入
-2. `ContextCompiler` 把工作区快照编译成主控 agent 上下文
-3. 主控 agent 通过受控工具补材料，并输出一个 `BrainStepResult`
-4. 应用层按 action 回写提纲、草稿、修订或追问
-5. 当主控输出 `finalize` 且终稿文本可消费时直接导出终稿
+- 使用独立 `ReviewSpecialist`
+- 通过 `agent.as_tool()` 暴露给 coordinator
+- 返回结构化审阅结论
+- 直接影响 coordinator 的最终动作
 
-这里有两个明确原则：
-
-- 工作流判断尽量交给 agent，本地层只保留事实、记录、适配
-- 应用层不再使用独立质量门禁，也不再追加一轮应用层 LLM 评审
-- `evidence_board`、提纲、质量待办等中间态是辅助记忆，不是默认硬门槛
-
-## Agent 编排
-
-当前主链路不再把 specialist 当成被动字段填充器，而是采用更接近协作决策的模式：
-
-1. coordinator 先给出当前回合的初步方案
-2. specialist 生成中间文本，并可返回 `feedback`
-3. 如 specialist 认为当前方案不理想，可建议改动作、补充假设或提示主要风险
-4. coordinator 再作最终业务决策
-5. 应用层只做协议消费、状态写回和导出
-
-这意味着：
-
-- coordinator 负责“如何最好完成任务”
-- specialist 可以表达“支持 / 调整 / 改道 / 建议追问”
-- 程序默认不再因为中间字段未满而否决 agent 的业务判断
-
-## 输出与产物
+## 输出
 
 默认会在 `.super_gongwen/sessions/<session_id>/` 下生成：
 
-- `workspace.json`：工作区事实源
-- `events.jsonl`：运行事件流
-- `debug/`：上下文、请求、响应与步骤调试文件
-- `versions/`：中间版本产物
-- `tool_results/`：工具结果落盘
-- `outputs/final.md`
-- `outputs/final.docx`
+- `workspace.json`
+- `debug/latest_run.json`
+- `outputs/final.md`（仅在 `finalize` 时生成）
 
-终稿是否成熟由主控 agent 结合上下文、自审、历史快照、specialist 反馈与主要风险自行判断；应用层只负责执行导出，不再追加业务门禁裁决。
+## 验证
 
-当材料并不完备时，系统允许输出：
+当前最小测试集：
 
-- 正式终稿
-- 保守交付稿
-- 待补充稿
-- 需要用户继续确认的问题清单
+```bash
+python -m unittest tests.test_minimal_runtime
+```
 
-这些完成方式会通过 `completion_mode`、`decision_rationale`、`assumptions`、`major_risks` 等字段记录下来，而不是只靠“能不能 finalize”二元表示。
-
-## Agents SDK 输出模式
-
-- 当前主控与 specialist 已统一使用文本 JSON 协议
-- 运行时会解析 `<think> + json`、代码块 JSON、半结构化文本，并在必要时触发一次 JSON 修复回合
-- 若 LiteLLM provider 把业务动作误发成 tool call，运行时会自动切到无工具恢复模式重跑
-- 调试信息会记录 `decision_trace`，用于说明 coordinator proposal、specialist feedback 与最终决策
-
-## 已知边界
-
-- 当前工具面只聚焦本地 `materials/`，不以内置联网检索为主路径
-- `app.py` 仍然偏大，但主链路已经清晰收敛
-- 文稿质量更多依赖主控 agent 的语义判断、specialist 反馈、`self_review` 与风险披露，而不是本地启发式规则
-- 缺少 `evidence` 不会自动等同于拒绝推进；系统会优先尝试保守交付或显式追问
-
-## 参考
-
-- 架构说明：[arch.md](./arch.md)
-- 项目基线：[openspec/project.md](./openspec/project.md)
-- 当前变更规格：[openspec/changes/strengthen-agent-led-orchestration/](./openspec/changes/strengthen-agent-led-orchestration/)
+更多设计说明见 [arch.md](./arch.md)。

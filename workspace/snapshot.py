@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from utils.serialization import JsonDataclassMixin
+from .common import JsonDataclassMixin
 from .models import (
     DirectiveLedger,
     DraftArtifact,
