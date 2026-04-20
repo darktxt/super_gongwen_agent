@@ -20,9 +20,27 @@ def save_final_output(
     *,
     encoding: str = "utf-8",
 ) -> Path:
+    return save_named_output(
+        session_id=session_id,
+        filename="final.md",
+        content=content,
+        app_home=app_home,
+        encoding=encoding,
+    )
+
+
+def save_named_output(
+    session_id: str,
+    filename: str,
+    content: str,
+    app_home: str | Path | None = None,
+    *,
+    encoding: str = "utf-8",
+) -> Path:
     paths = initialize_session_storage(session_id=session_id, app_home=app_home)
-    paths.final_output_path.write_text(content, encoding=encoding)
-    return paths.final_output_path
+    target = paths.outputs_dir / filename
+    target.write_text(content, encoding=encoding)
+    return target
 def write_debug_json(
     session_id: str,
     filename: str,

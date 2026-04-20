@@ -10,6 +10,8 @@ class SessionPaths:
     workspace_path: Path
     debug_dir: Path
     outputs_dir: Path
+    outline_output_path: Path
+    draft_output_path: Path
     final_output_path: Path
     latest_run_path: Path
 def _resolve_app_home_path(app_home: str | Path | None) -> Path:
@@ -29,6 +31,8 @@ def build_session_paths(session_id: str, app_home: str | Path | None = None) -> 
         workspace_path=session_root / "workspace.json",
         debug_dir=debug_dir,
         outputs_dir=outputs_dir,
+        outline_output_path=outputs_dir / "outline.md",
+        draft_output_path=outputs_dir / "draft.md",
         final_output_path=outputs_dir / "final.md",
         latest_run_path=debug_dir / "latest_run.json",
     )

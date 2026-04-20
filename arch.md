@@ -118,14 +118,14 @@ coordinator 是唯一最终业务裁决者，输出 `CoordinatorResult`，包含
 
 工具结果会回写成最小 tool event，供 `workspace` 更新材料状态。
 
-### 4.3 review specialist
+### 4.3 judge loop
 
-`ReviewSpecialist` 是独立 agent：
+`JudgeAgent` 是独立审阅 agent：
 
-- 输入：草稿、目标、材料摘要、当前风险
-- 输出：`ReviewResult`
+- 输入：用户目标、材料摘要、候选动作、候选正文
+- 输出：`JudgeResult`
 
-它通过 `agent.as_tool()` 暴露为 `review_draft`，由 coordinator 按需调用。
+它不再作为 tool 暴露，而是在 runtime 中以轻量 `writer -> judge -> writer` 回路运行。judge 只给反馈，不直接替程序做业务裁决。
 
 ### 4.4 LiteLLM runtime
 
@@ -177,7 +177,8 @@ coordinator 是唯一最终业务裁决者，输出 `CoordinatorResult`，包含
   -> 读取 workspace
   -> coordinator 运行
       -> function_tool 取材
-      -> review_draft 审稿
+      -> judge 审阅候选稿
+      -> 必要时回灌反馈后再写一轮
   -> 输出结构化结果
   -> 写回 workspace
   -> 如有 finalize，写出 final.md
